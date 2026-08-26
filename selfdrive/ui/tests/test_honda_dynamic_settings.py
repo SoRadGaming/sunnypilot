@@ -19,16 +19,22 @@ import json
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).parents[3]
-HONDA_PANEL = ROOT / "selfdrive/ui/sunnypilot/layouts/settings/vehicle/brands/honda.py"
-CRUISE_PANEL = ROOT / "selfdrive/ui/sunnypilot/layouts/settings/cruise.py"
-PARAMS_KEYS = ROOT / "common/params_keys.h"
+# Anchored on this file, not on the repo root: upstream has since moved the
+# python tree down into openpilot/, so a fixed number of .parents hops from the
+# root breaks on the next upstream sync. BASE is whatever directory holds
+# selfdrive/ and sunnypilot/; opendbc_repo stays a submodule at the true root.
+BASE = Path(__file__).parents[3]
+ROOT = next(p for p in (BASE, *BASE.parents) if (p / "opendbc_repo").exists())
+
+HONDA_PANEL = BASE / "selfdrive/ui/sunnypilot/layouts/settings/vehicle/brands/honda.py"
+CRUISE_PANEL = BASE / "selfdrive/ui/sunnypilot/layouts/settings/cruise.py"
+PARAMS_KEYS = BASE / "common/params_keys.h"
 TUNER = ROOT / "opendbc_repo/opendbc/sunnypilot/car/honda/dynamic_tuning.py"
-SDUI = ROOT / "sunnypilot/sunnylink/settings_ui.json"
-MICI_PANEL = ROOT / "selfdrive/ui/sunnypilot/mici/layouts/vehicle.py"
-MICI_SETTINGS = ROOT / "selfdrive/ui/sunnypilot/mici/layouts/settings.py"
-SHARED = ROOT / "sunnypilot/selfdrive/car/honda_dynamic_tuning.py"
-GENERATOR = ROOT / "sunnypilot/sunnylink/tools/generate_settings_schema.py"
+SDUI = BASE / "sunnypilot/sunnylink/settings_ui.json"
+MICI_PANEL = BASE / "selfdrive/ui/sunnypilot/mici/layouts/vehicle.py"
+MICI_SETTINGS = BASE / "selfdrive/ui/sunnypilot/mici/layouts/settings.py"
+SHARED = BASE / "sunnypilot/selfdrive/car/honda_dynamic_tuning.py"
+GENERATOR = BASE / "sunnypilot/sunnylink/tools/generate_settings_schema.py"
 
 TOGGLE_PARAMS = ("HondaDynamicTuningEnabled", "HondaDynamicPcmBlendEnabled")
 
