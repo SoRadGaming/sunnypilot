@@ -27,6 +27,8 @@ TUNER = ROOT / "opendbc_repo/opendbc/sunnypilot/car/honda/dynamic_tuning.py"
 SDUI = ROOT / "sunnypilot/sunnylink/settings_ui.json"
 MICI_PANEL = ROOT / "selfdrive/ui/sunnypilot/mici/layouts/vehicle.py"
 MICI_SETTINGS = ROOT / "selfdrive/ui/sunnypilot/mici/layouts/settings.py"
+SHARED = ROOT / "sunnypilot/selfdrive/car/honda_dynamic_tuning.py"
+GENERATOR = ROOT / "sunnypilot/sunnylink/tools/generate_settings_schema.py"
 
 TOGGLE_PARAMS = ("HondaDynamicTuningEnabled", "HondaDynamicPcmBlendEnabled")
 
@@ -34,7 +36,7 @@ TOGGLE_PARAMS = ("HondaDynamicTuningEnabled", "HondaDynamicPcmBlendEnabled")
 PARAM_ENTRY_RE = re.compile(r'\{"(?P<key>\w+)",\s*\{(?P<flags>[^,}]+),\s*(?P<type>\w+)(?:,\s*"(?P<default>[^"]*)")?\}\}')
 
 
-def _panel_constant(name: str, path: Path = HONDA_PANEL):
+def _panel_constant(name: str, path: Path = SHARED):
   tree = ast.parse(path.read_text())
   for node in tree.body:
     if isinstance(node, ast.Assign | ast.AnnAssign):
@@ -81,14 +83,41 @@ def test_pedal_gain_breakpoints_match_the_learned_gains():
   assert list(breakpoints) == sorted(breakpoints), "breakpoints must ascend"
 
 
+def _imports_shared(path: Path) -> set[str]:
+  tree = ast.parse(path.read_text())
+  return {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+          and (node.module or "").endswith("honda_dynamic_tuning") for alias in node.names}
+
+
+def test_shared_module_is_dependency_free():
+  # it is imported by the settings panels, by the small-screen page and by
+  # sunnylinkd (which has no raylib); an import here would leak into all three
+  tree = ast.parse(SHARED.read_text())
+  imports = [n for n in ast.walk(tree) if isinstance(n, ast.Import | ast.ImportFrom)]
+  assert not imports, f"{SHARED.name} must stay dependency-free, found {len(imports)} imports"
+
+
 def test_both_panels_drive_the_same_params():
-  # the toggle exists in Settings > Cruise and in Settings > Vehicle > Honda;
-  # if one of them ever points at a different key they would silently disagree
+  # the toggle exists in Settings > Cruise, in Settings > Vehicle > Honda, on
+  # the small screen and in the app; if one of them ever points at a different
+  # key they would silently disagree
   cruise = CRUISE_PANEL.read_text()
-  honda = HONDA_PANEL.read_text()
   for key in TOGGLE_PARAMS:
     assert key in cruise, f"the Cruise panel no longer references {key}"
-    assert key in honda, f"the Honda vehicle panel no longer references {key}"
+  assert {"TUNING_PARAM", "PCM_BLEND_PARAM"} <= _imports_shared(HONDA_PANEL), \
+    "the Honda vehicle panel must take the toggle params from the shared module"
+
+
+def test_generator_injects_the_learned_values():
+  # the app is served a schema the device generates per request, so the numbers
+  # can travel as row descriptions even if the frontend does not resolve param
+  # values for read-only rows
+  src = GENERATOR.read_text()
+  assert "_inject_honda_learned_values" in src, "the schema generator no longer injects the learned values"
+  assert re.search(r"def _load_definition.*?_inject_honda_learned_values", src, re.DOTALL), \
+    "the injector is defined but never called from _load_definition"
+  assert {"LEARNED_DEFAULTS", "PEDAL_GAIN_KEYS"} <= _imports_shared(GENERATOR), \
+    "the generator must take the key list from the shared module"
 
 
 def test_honda_panel_publishes_its_items():
@@ -107,11 +136,8 @@ def test_honda_panel_publishes_its_items():
 def test_mici_page_shares_the_panel_params():
   # the small screen (mici, comma 4) has no Cruise or Vehicle panel of its own,
   # so it carries its own page -- it must drive the same params, not re-spell them
-  tree = ast.parse(MICI_PANEL.read_text())
-  imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
-              and (node.module or "").endswith("vehicle.brands.honda") for alias in node.names}
-  assert {"TUNING_PARAM", "PCM_BLEND_PARAM"} <= imported, \
-    "the small-screen page must import the toggle params from the brand panel"
+  assert {"TUNING_PARAM", "PCM_BLEND_PARAM"} <= _imports_shared(MICI_PANEL), \
+    "the small-screen page must import the toggle params from the shared module"
 
   # any learned key it does name literally has to be a real one: learned_value()
   # falls back to LEARNED_DEFAULTS, so a typo would be a KeyError on render
@@ -152,11 +178,16 @@ def test_sunnylink_exposes_the_same_toggles():
 
 
 def test_sunnylink_learned_values_are_read_only():
+  # `info` is the read-only widget, and the one shape of read-only row known to
+  # render in the app (LanguageSetting). The `blocked` hint is deliberately NOT
+  # set: it is the only structural difference from that working row, nothing
+  # device-side reads it (sunnylinkd enforces its own BLOCKED_PARAMS list), and
+  # it was a candidate for why these rows never appeared.
   learned = _panel_constant("LEARNED_DEFAULTS")
   for item in _sdui_honda_items():
     if item["key"] in learned:
       assert item["widget"] == "info", f"{item['key']} is learned state, not a setting"
-      assert item.get("blocked") is True, f"{item['key']} must not be writable from the dashboard"
+      assert "options" not in item and "min" not in item, f"{item['key']} must not offer an editor"
 
 
 def test_sunnylink_keys_are_registered_and_unique():

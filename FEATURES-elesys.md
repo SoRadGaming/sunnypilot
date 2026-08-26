@@ -45,9 +45,10 @@ reset.
 **On a comma 3 / 3X** (the big screen): **Settings → Vehicle**, on the Honda page, or
 **Settings → Cruise** near the bottom of the list.
 
-**In the sunnylink app**, on any device: under Vehicle → Honda Settings, with the learned
-values listed read-only. The app renders whatever settings list the *device* publishes, so if
-the Honda section shows up in the app, that is proof the device is running this code.
+**In the sunnylink app**, on any device: under Vehicle → Honda Settings. The learned values are
+listed there read-only, each row showing the number and what it means — "1.340 — 34% more pedal
+than stock at this speed". The device fills those in when the app asks for the settings list,
+so they are as current as the last save.
 
 Both toggles are **off** by default.
 
@@ -73,8 +74,8 @@ it automatically.
 
 ## Seeing what it has learned
 
-On the comma 4 it is the card at the front of **Settings → vehicle**: the six pedal gains in
-speed order, then the brake and aero trims. On the big screen it is **Settings → Vehicle →
+On the comma 4 it is the first two cards in **Settings → vehicle**: the pedal gains split
+low/high across two cards (0–22 and 36–72 km/h), then brake gain and aero. On the big screen it is **Settings → Vehicle →
 Learned Values**, and in the app it is the read-only rows under Honda Settings. Same numbers
 either way:
 

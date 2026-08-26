@@ -10,42 +10,17 @@ from openpilot.common.constants import CV
 from openpilot.common.params import UnknownKeyName
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.vehicle.brands.base import BrandSettings
 from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.sunnypilot.selfdrive.car.honda_dynamic_tuning import (
+  LEARNED_DEFAULTS,
+  PCM_BLEND_PARAM,
+  PEDAL_GAIN_BP,
+  TUNING_PARAM,
+)
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.system.ui.sunnypilot.widgets.list_view import button_item_sp, toggle_item_sp
 from openpilot.system.ui.widgets import DialogResult
 from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog
-
-# Speed breakpoints of the learned pedal gain, in m/s. Mirrors ELESYS_GAS_BP /
-# PEDAL_GAIN_BP in opendbc/sunnypilot/car/honda/{gas_interceptor,dynamic_tuning}.py.
-PEDAL_GAIN_BP = (0.0, 3.0, 6.0, 10.0, 15.0, 20.0)
-
-# The learned state, with the same defaults as _PARAM_SPEC in
-# opendbc/sunnypilot/car/honda/dynamic_tuning.py and as common/params_keys.h.
-#
-# Deliberately duplicated instead of imported: this panel is built while the
-# settings screen is coming up, and the tuner drags in the whole opendbc car
-# stack. An import error there (a submodule that isn't checked out, say) would
-# take the settings panel off the screen rather than just breaking the tuner.
-# selfdrive/ui/tests/test_honda_dynamic_settings.py keeps the two in sync.
-LEARNED_DEFAULTS: dict[str, float] = {
-  "HondaDynPedalGain0": 1.0,
-  "HondaDynPedalGain1": 1.0,
-  "HondaDynPedalGain2": 1.0,
-  "HondaDynPedalGain3": 1.0,
-  "HondaDynPedalGain4": 1.0,
-  "HondaDynPedalGain5": 1.0,
-  "HondaDynGasFactor": 1.0,
-  "HondaDynGasAlpha": 0.0,
-  "HondaDynAverageFactor": 0.95,
-  "HondaDynSpeedFactor": 4.0,
-  "HondaDynSpeedAlpha": 0.0,
-  "HondaDynWindFactor": 1.0,
-  "HondaDynBrakeGain": 0.0,
-}
-
-TUNING_PARAM = "HondaDynamicTuningEnabled"
-PCM_BLEND_PARAM = "HondaDynamicPcmBlendEnabled"
 
 # reading 13 params at 60 fps would be 13 file reads a frame; once a second is
 # plenty for a readout that only changes once a minute anyway

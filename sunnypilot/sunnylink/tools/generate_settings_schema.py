@@ -14,6 +14,8 @@ import json
 import os
 from collections.abc import Callable
 
+from openpilot.common.params import Params
+from openpilot.sunnypilot.selfdrive.car.honda_dynamic_tuning import LEARNED_DEFAULTS, PEDAL_GAIN_KEYS, gain_meaning
 from openpilot.sunnypilot.sunnylink.capabilities import CAPABILITY_FIELDS, CAPABILITY_LABELS
 
 SCHEMA_VERSION = "1.0"
@@ -59,11 +61,54 @@ def _inject_dynamic_options(schema: dict) -> None:
   _walk_all_items(schema, visitor)
 
 
+def _inject_honda_learned_values(schema: dict) -> None:
+  """Write each learned value into its own row's description.
+
+  The rows are `info` widgets keyed on the learned params, so a frontend that
+  resolves param values for read-only rows already shows them. This does not
+  depend on that: the schema is generated on the device, per request, so the
+  numbers can travel as text and be readable either way. Learned state only
+  ever moves while driving -- a schema fetched now is as current as the last
+  60 s write.
+  """
+  try:
+    params = Params()
+  except Exception:  # pragma: no cover - Params is always available on a device
+    return
+
+  def _value(key: str) -> float | None:
+    try:
+      raw = params.get(key, return_default=True)
+      return float(raw) if raw is not None else LEARNED_DEFAULTS.get(key)
+    except Exception:
+      # an older params registry, or a corrupt value: leave the authored
+      # description alone rather than taking the whole settings screen down
+      return None
+
+  def visitor(item: dict) -> None:
+    key = item.get("key")
+    if key not in LEARNED_DEFAULTS:
+      return
+    value = _value(key)
+    if value is None:
+      return
+    if key in PEDAL_GAIN_KEYS:
+      item["description"] = f"{value:.3f} - {gain_meaning(value)}."
+    elif key == "HondaDynBrakeGain":
+      item["description"] = f"{value:+.3f} - " + ("nothing learned yet." if abs(value) < 0.005 else
+                                                  ("more brake than stock." if value > 0 else "less brake than stock."))
+    else:
+      item["description"] = f"{value:.3f}"
+
+  _walk_all_items(schema, visitor)
+
+
 def _load_definition() -> dict:
   """Load settings_ui.json and inject dynamic options sourced from runtime data files."""
   with open(DEFINITION_PATH) as f:
     schema = json.load(f)
   _inject_dynamic_options(schema)
+  _inject_honda_learned_values(schema)
   return schema
 
 

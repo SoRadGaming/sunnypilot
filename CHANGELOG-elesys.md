@@ -357,6 +357,36 @@ back empty — a fingerprint that hasn't resolved yet must never be the reason a
 disappears. That lookup is cached on the same 1 s tick because a visibility lambda runs every
 frame and `CarPlatformBundle` is JSON.
 
+### 10d. Learned values where they can actually be read
+
+`sunnypilot/selfdrive/car/honda_dynamic_tuning.py` (new), `generate_settings_schema.py`,
+`vehicle.yaml`, `mici/layouts/vehicle.py`
+
+Two fixes off the first drive with 10a-10c on the car.
+
+**The small-screen card overlapped.** `UnifiedLabel` wraps by default, and the headers were
+written for a 340 px box at font 48 — "learned pedal gain" is about 430 px, so it wrapped onto
+the value line, and the rows draw at fixed offsets so nothing pushed anything down. Now: two
+cards instead of one (`pedal 0-22` / `pedal 36-72`, then `brake gain` / `aero`), every label
+`wrap_text=False` so an over-long string elides instead of colliding, and no six-value line
+that has to marquee to fit.
+
+**The app showed no values.** Two candidate causes, both addressed:
+
+- the `blocked: true` hint was the only structural difference between these rows and
+  `LanguageSetting`, the one read-only row known to render. Nothing device-side reads it —
+  sunnylinkd enforces its own hardcoded `BLOCKED_PARAMS` — so it is gone;
+- the frontend may simply not resolve param values for read-only rows. So the value no longer
+  has to survive that trip: `getParamsMetadata` calls `generate_schema()` on the device, per
+  request, and the generator now writes each learned value into its own row's description
+  ("1.340 - 34% more pedal than stock at this speed"). Learned state only moves while driving,
+  so a schema fetched now is as current as the last 60 s write.
+
+The param names, defaults and speed bands moved into a new dependency-free module. Four places
+needed them — two panels, the small-screen page and sunnylinkd — and sunnylinkd has no raylib,
+so the settings panel could not stay the source. A test asserts the module imports nothing at
+all.
+
 ## 11. Tests
 
 - `opendbc/car/honda/tests/test_elesys.py` — 44 tests (was 36). Added pump deadband scaling,
@@ -370,7 +400,7 @@ frame and `CarPlatformBundle` is JSON.
   `CarController`: toggle-off is stock, gas and brake never concurrent, standstill hold is
   gain-invariant, disengage unwinds, crossfade inert with the blend off.
 - `selfdrive/controls/tests/test_stopping_debounce.py` (new) — incl. disengage-is-not-debounced.
-- `selfdrive/ui/tests/test_honda_dynamic_settings.py` (new) — 11 tests. Parses (never imports,
+- `selfdrive/ui/tests/test_honda_dynamic_settings.py` (new) — 13 tests. Parses (never imports,
   so it runs without raylib) the two panels, `params_keys.h`, the tuner and the sunnylink
   schema, and asserts they agree on the key names, the defaults, the speed bands, the param
   types and flags, that the Honda brand page actually publishes its items, and that the

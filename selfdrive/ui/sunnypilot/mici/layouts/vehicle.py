@@ -20,13 +20,11 @@ from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.mici.widgets.button import BigButton, BigParamControl
 from openpilot.selfdrive.ui.mici.widgets.dialog import BigConfirmationDialog
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.vehicle.brands.honda import (
-  PCM_BLEND_PARAM,
-  PEDAL_GAIN_BP,
-  TUNING_PARAM,
   learned_pedal_gains,
   learned_value,
   reset_learned_values,
 )
+from openpilot.sunnypilot.selfdrive.car.honda_dynamic_tuning import PCM_BLEND_PARAM, PEDAL_GAIN_BP, TUNING_PARAM
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.multilang import tr
@@ -62,55 +60,75 @@ def car_brand() -> str:
   return _brand_cache[0]
 
 
-class HondaLearnedInfo(Widget):
-  """Two header/value pairs, laid out like SunnylinkInfo and CurrentModelInfo."""
+class InfoCard(Widget):
+  """Two header/value pairs, laid out like SunnylinkInfo and CurrentModelInfo.
 
-  def __init__(self):
+  Every label is single-line: at font 48 a header longer than about eleven
+  characters wraps onto the value line below it, and the two then draw on top
+  of each other -- these rows are drawn at fixed offsets, so nothing pushes
+  anything down. wrap_text=False makes an over-long string elide instead.
+  """
+
+  HEADER_SIZE = 48
+  VALUE_SIZE = 32
+
+  def __init__(self, refresh: Callable[[], tuple[str, str, str, str]]):
     super().__init__()
     self.set_rect(rl.Rectangle(0, 0, 360, 180))
+    self._refresh = refresh
 
     header_color = rl.Color(255, 255, 255, int(255 * 0.9))
     value_color = rl.Color(255, 255, 255, int(255 * 0.9 * 0.65))
     max_width = int(self._rect.width - 20)
 
-    self.gain_header = UnifiedLabel(tr("learned pedal gain"), 48, max_width=max_width, text_color=header_color,
-                                    font_weight=FontWeight.DISPLAY)
-    self.gain_text = UnifiedLabel("", 32, max_width=max_width, text_color=value_color,
-                                  font_weight=FontWeight.ROMAN, scroll=True)
+    def label(size, color):
+      return UnifiedLabel("", size, max_width=max_width, text_color=color, wrap_text=False,
+                          font_weight=FontWeight.DISPLAY if size == self.HEADER_SIZE else FontWeight.ROMAN)
 
-    self.trim_header = UnifiedLabel(tr("brake / aero"), 48, max_width=max_width, text_color=header_color,
-                                    font_weight=FontWeight.DISPLAY)
-    self.trim_text = UnifiedLabel("", 32, max_width=max_width, text_color=value_color, font_weight=FontWeight.ROMAN)
+    self._top_header = label(self.HEADER_SIZE, header_color)
+    self._top_value = label(self.VALUE_SIZE, value_color)
+    self._bottom_header = label(self.HEADER_SIZE, header_color)
+    self._bottom_value = label(self.VALUE_SIZE, value_color)
 
     self._updated = 0.0
     self.refresh()
 
   def refresh(self) -> None:
     self._updated = time.monotonic()
-    speed_factor = CV.MS_TO_KPH if ui_state.is_metric else CV.MS_TO_MPH
-    unit = tr("km/h") if ui_state.is_metric else tr("mph")
-    gains = " ".join(f"{gain:.2f}" for gain in learned_pedal_gains())
-    bands = " ".join(f"{round(bp * speed_factor):d}" for bp in PEDAL_GAIN_BP)
-    self.gain_text.set_text(f"{gains}  ({bands} {unit})")
-    self.trim_text.set_text(f"{learned_value('HondaDynBrakeGain'):+.2f}   " +
-                            f"x{learned_value('HondaDynWindFactor'):.2f}")
+    top_header, top_value, bottom_header, bottom_value = self._refresh()
+    self._top_header.set_text(top_header)
+    self._top_value.set_text(top_value)
+    self._bottom_header.set_text(bottom_header)
+    self._bottom_value.set_text(bottom_value)
 
   def _update_state(self):
     if time.monotonic() - self._updated > REFRESH_S:
       self.refresh()
 
   def _render(self, _):
-    self.gain_header.set_position(self._rect.x + 20, self._rect.y - 10)
-    self.gain_header.render()
+    for label, dy in ((self._top_header, -10), (self._top_value, 68 - 25),
+                      (self._bottom_header, 114 - 30), (self._bottom_value, 161 - 25)):
+      label.set_position(self._rect.x + 20, self._rect.y + dy)
+      label.render()
 
-    self.gain_text.set_position(self._rect.x + 20, self._rect.y + 68 - 25)
-    self.gain_text.render()
 
-    self.trim_header.set_position(self._rect.x + 20, self._rect.y + 114 - 30)
-    self.trim_header.render()
+def _band_label(lo: int, hi: int) -> str:
+  # short on purpose: this is a font-48 header in a 340 px box
+  return f"{tr('pedal')} {lo}-{hi}"
 
-    self.trim_text.set_position(self._rect.x + 20, self._rect.y + 161 - 25)
-    self.trim_text.render()
+
+def _pedal_cards_text() -> tuple[str, str, str, str]:
+  gains = learned_pedal_gains()
+  factor = CV.MS_TO_KPH if ui_state.is_metric else CV.MS_TO_MPH
+  speeds = [round(bp * factor) for bp in PEDAL_GAIN_BP]
+  return (_band_label(speeds[0], speeds[2]), " ".join(f"{g:.2f}" for g in gains[:3]),
+          _band_label(speeds[3], speeds[5]), " ".join(f"{g:.2f}" for g in gains[3:]))
+
+
+def _trim_card_text() -> tuple[str, str, str, str]:
+  unit = tr("km/h") if ui_state.is_metric else tr("mph")
+  return (tr("brake gain"), f"{learned_value('HondaDynBrakeGain'):+.2f}",
+          tr("aero"), f"x{learned_value('HondaDynWindFactor'):.2f}   ({unit})")
 
 
 class VehicleLayoutMici(NavScroller):
@@ -118,7 +136,10 @@ class VehicleLayoutMici(NavScroller):
     super().__init__()
     self.set_back_callback(back_callback)
 
-    self._learned_info = HondaLearnedInfo()
+    # two cards rather than one: six gains plus their speed bands on a single
+    # 340 px line either scrolls as a marquee or runs off the card
+    self._pedal_info = InfoCard(_pedal_cards_text)
+    self._trim_info = InfoCard(_trim_card_text)
 
     self._learning_toggle = BigParamControl(tr("dynamic longitudinal learning"), TUNING_PARAM,
                                             toggle_callback=self._on_learning_toggled)
@@ -134,7 +155,8 @@ class VehicleLayoutMici(NavScroller):
     # onroad would just be undone
     self._reset_btn.set_enabled(ui_state.is_offroad)
 
-    self._scroller.add_widgets([self._learned_info, self._learning_toggle, self._pcm_blend_toggle, self._reset_btn])
+    self._scroller.add_widgets([self._pedal_info, self._trim_info, self._learning_toggle,
+                                self._pcm_blend_toggle, self._reset_btn])
 
     self._refreshed = 0.0
 
@@ -153,12 +175,14 @@ class VehicleLayoutMici(NavScroller):
 
   def _on_reset_confirmed(self) -> None:
     reset_learned_values()  # re-checks offroad: the dialog can sit open across an ignition
-    self._learned_info.refresh()
+    self._pedal_info.refresh()
+    self._trim_info.refresh()
 
   def show_event(self):
     super().show_event()
     self._refresh_toggles()
-    self._learned_info.refresh()
+    self._pedal_info.refresh()
+    self._trim_info.refresh()
 
   def _refresh_toggles(self) -> None:
     # the same two params are also set from the big UI's panels and from the
