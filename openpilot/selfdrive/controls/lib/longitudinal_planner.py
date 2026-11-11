@@ -18,6 +18,7 @@ from openpilot.common.swaglog import cloudlog
 
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
 from openpilot.sunnypilot.selfdrive.controls.lib.stopping_tune import STOPPING_SPEED  # FORK(HONDA_ACCORD_9G_AU)
+from openpilot.sunnypilot.selfdrive.controls.lib.e2e_stop import E2EStopEntry, e2e_stop_applies  # FORK(HONDA_ACCORD_9G_AU)
 from openpilot.sunnypilot.selfdrive.controls.lib.held_lead import real_lead  # FORK(HONDA_ACCORD_9G_AU)
 from openpilot.sunnypilot.selfdrive.controls.lib.reentry_ramp import ReentryRamp, lead_decel, reentry_ramp_applies  # FORK(HONDA_ACCORD_9G_AU)
 from openpilot.common.params import Params  # FORK(CLOSE-FOLLOW)
@@ -79,6 +80,9 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.output_should_stop = False
     # FORK(HONDA_ACCORD_9G_AU): per-car stopping speed (stopping_tune.py); None keeps upstream's for every other car.
     self.v_ego_stopping = STOPPING_SPEED.get(CP.carFingerprint)
+    # FORK(HONDA_ACCORD_9G_AU): the red-light stop entry at STOPPING_SPEED (e2e_stop.py); None on every other car, in stock
+    # ACC mode and with HondaDynamicTuningEnabled off (no soft stop), which keeps upstream's e2e stop (v_ego < 0.3) bit for bit
+    self.e2e_stop = E2EStopEntry(self.v_ego_stopping) if e2e_stop_applies(CP, CP_SP) else None
     # FORK(HONDA_ACCORD_9G_AU): the ramp-in after the driver lifts off the gas (reentry_ramp.py); None on every other
     # car and in stock ACC mode, which keeps upstream's plan bit for bit.
     self.reentry_ramp = ReentryRamp(dt) if reentry_ramp_applies(CP, CP_SP) else None
@@ -187,6 +191,16 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
 
     is_e2e = self.is_e2e(sm)
+    # FORK(HONDA_ACCORD_9G_AU): at a red light ask to stop below 0.8 m/s, as the MPC already does behind a lead, once the
+    # model's own plan is below 0.3 m/s 2 s out and the grade is -2.5..+1 deg; latched while should_stop holds. The model's
+    # own flag passes through untouched; only the e2e candidate's stop flag changes, never an accel (e2e_stop.py)
+    if self.e2e_stop is not None:
+      orientation = sm['carControl'].orientationNED
+      output_should_stop_e2e = self.e2e_stop.update(v_ego, output_a_target_e2e, output_should_stop_e2e, sm['modelV2'].velocity.x,
+                                                    is_e2e and not reset_state,
+                                                    pitch=orientation[1] if len(orientation) == 3 else None)
+      if self.e2e_stop.log_line is not None:
+        cloudlog.info(self.e2e_stop.log_line)
 
     self.a_cruise = get_cruise_accel(is_e2e, v_cruise, v_ego,
                                      self.a_cruise, a_target_prev, steer_angle_without_offset, self.CP, self.dt,
