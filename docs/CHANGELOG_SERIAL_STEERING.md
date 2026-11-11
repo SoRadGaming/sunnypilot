@@ -15,6 +15,156 @@ is `docs/SP_GATEWAY_FIRMWARE.md`.
 
 ---
 
+## 2026-11-11 — push19: red lights stop the way queue stops do (Fix A), and gentle queue stops finish at the normal gap (stop-gap) (boards unchanged)
+
+You asked, after the 17f-183 report: "build 1 and 2, push when ready" - 1 being red-light Fix A, 2 the queue stop-gap
+governor (v2b). **Branch `push19`, three commits on push18 (`d510b78c9`): Fix A's planner side with the opendbc bump,
+the stop-gap governor, these documents. opendbc branch `push19` (`5e445d18`, one commit on `14ec02f8`): Fix A's soft
+stop changes. Panda and both boards unchanged. Not driven yet.** The details are in `docs/fork/RED-LIGHT-STOPS-2026-11.md`
+(Fix A) and `docs/fork/DRIVES-17F-183-2026-11.md` (sections 1 and 3).
+
+Both are built only for this car with openpilot longitudinal, stock ACC mode off and Dynamic Tuning
+(`HondaDynamicTuningEnabled`) on - the switch the soft stop is built with. With Dynamic Tuning off, in stock ACC mode
+and on every other car, the planner is push18's bit for bit. The ACC stand-down (MAIN_ON=0) and the stock CMBS/AEB
+forwarding are not touched.
+
+### What you will notice
+
+**At a red light with nothing ahead** (experimental mode, on a grade between -2.5 and +1 degrees):
+
+* **The stop begins at about 0.8 m/s, 1.5-2.5 s before the wheels stop** - the same path a stop behind a car takes -
+  instead of at 0.28 m/s with the wheels already stopping. Until now only the model could ask to stop there, and it
+  asks only below 0.3 m/s; before that the brake dipped about 50 counts near 1 m/s, the car nearly coasted, crawled
+  for 2.5-4.7 s and then the stop came in with a step ("release, then slam").
+* **A shorter crawl, and on the flat most of the dip is gone.** Replayed on the five clean red-light stops on record,
+  the car rests a median 0.33 m (0.21-0.85) shorter, and the deceleration as the wheels stop goes from about 0.28 to
+  0.48 m/s^2 (at most 0.59).
+* **Not proven:** whether the last step feels softer. The jerk cannot be simulated; that is what the next drive tests.
+* **Unchanged:** the overrun that builds above 0.8 m/s (most of 17f's), any take-over, and stops on a steeper downhill
+  or uphill (outside the band the stop is today's, at 0.28 m/s).
+
+**Behind a stopped car, after a gentle arrival** (the model leading, a crawling queue, a short hop):
+
+* **In the last 9 km/h the braking eases by up to 0.3 m/s^2**, the car rolls about 1-1.5 m further at walking pace,
+  then gives the same soft stop as today. It rests at about **4.9-5.3 m on the radar** (4.5-4.9 m on the camera)
+  instead of 6-7.4 m. The stop comes 0.1-0.3 s later at the median (1.75 s at most).
+* Occasionally, after it has eased, the last meter brakes up to 0.3 m/s^2 firmer, so the stop cannot end inside 4.7 m.
+* **Unchanged:** brisk arrivals (they already end at 4.5-5.5 m), normal stops, a stop that follows a hard brake (it
+  waits 3 s after any hard braking, FCW or a hard-braking car), stops behind a car still creeping forward, and probably
+  most hops up the queue (the radar is back for only about half of a hop).
+
+**Pulling away does not change.** The slow acceleration behind a car and the gap growing were looked at in the same
+report: the cause is the model's own acceleration, and the only version of a fix that kept the hard-brake margins never
+acted (`DRIVES-17F-183-2026-11.md` section 2). Nothing about launches, the launch delay, close follow or the gap while
+moving is different in push19.
+
+### How it works
+
+* **Fix A** (`openpilot/sunnypilot/selfdrive/controls/lib/e2e_stop.py`, `FORK(HONDA_ACCORD_9G_AU)`): the experimental
+  mode candidate also asks to stop when the speed is below 0.8 m/s and the model's accel below 0.1 (the rule the MPC
+  already uses behind a car), the model's own plan is below 0.3 m/s two seconds out, and the pitch is between -0.044 and
+  +0.0175 rad. Once on it stays on while that rule holds, and lets go when the model asks to go or the car is back above
+  0.8 m/s. It changes only that candidate's stop flag - never an accel, never the model's own flag - and it is checked
+  before the candidates, after `is_e2e`.
+* **Fix A, opendbc** (`opendbc/sunnypilot/car/honda/elesys_stop.py`): a red-light stop now spends 1.5-2 s rolling at
+  the soft stop's ceiling, so while the wheels turn the ceiling firms up when the car slows less than 0.5 m/s^2
+  (150 counts/s per m/s^2 short, at most 75 counts/s; only up, never past the command, frozen at wheel-zero), and the
+  backstop timer grows with the entry speed (1.9 s up to 0.6 m/s, 2.4 s at 0.8). Queue stops: in 300 replays the rest
+  point moved a median 0.000 m.
+* **Stop-gap** (`openpilot/sunnypilot/selfdrive/controls/lib/stop_gap.py`, `FORK(STOP-GAP)`): below 2.5 m/s, behind a
+  radar-tracked lead the camera confirms that is stopped or creeping (0.5 m/s at most), the plan may be raised by at
+  most 0.30 m/s^2 toward the deceleration that brings the car to 0.77 m/s at 5.77 m, so today's stop ends near 5.2 m.
+  It changes only the plan's accel, after the candidates and the re-entry ramp; the stop entry, the stopping state,
+  the soft stop and every stop flag are today's. Trips end it for that stop: no radar lead or a held one, a new track
+  that does not continue the old range, a range jump, the camera missing or more than 1 m closer than the radar, the
+  queue moving off, a downhill steeper than -2.5 degrees, the gas, a reset, a plan under -1.0 after it has eased. The
+  stop entry (the 0.8 m/s rule firing) is its normal end.
+* **The rejected "hold" is gone.** The v2b design still carried, switched off, a hold that deferred the stop to 0.3 m/s
+  (v1: when the queue moved off mid-hold the car never stopped). It is deleted outright - no switch, no constants, no
+  branch in the planner that swaps the stop rule - so no code that defers a stop ships. With the hold off the designed
+  module and the shipped one give bit-identical plans (the proof is below).
+
+### What the routes will show
+
+Three lines in the route's logMessage, one per engagement:
+
+* `e2estop on v=0.79 a=-0.42 deg=-1.23 model=0` - Fix A latched: the speed, the model's accel, the grade, and whether
+  the model's own stop flag was already on.
+* `hondastop rise=settle ... firm=N v=0.7x` - the soft stop's line (when its ceiling starts to rise) now also says how
+  many counts the firm-up added and the entry speed.
+* `stopgap end=entry arm_v=1.84 arm_gap=8.12 max_lift=0.30 catch=0.00` - the governor let go: why (`entry` is the
+  normal end; `camera`, `newTrack`, `leadJump`, `pullAway`, `planBraking`, `hazardHold`, `downhill`, `gas`, `off` are
+  trips), where it started, the most it raised the plan and the most the catch lowered it.
+
+### Gates
+
+On `~/sp-p19` (branch `push19`, built with scons), and the same commands on a clean push18 worktree (`d510b78c9`,
+opendbc `14ec02f8`, also built):
+
+| suite (`tools/test_runner.py -j 12`) | push18 | push19 |
+|---|---|---|
+| `test_e2e_stop`, `test_stop_gap`, `test_stopping_debounce`, `test_close_follow`, `test_lead_brake_close_follow` | 111 passed (the new two do not exist) | **143 passed**: +12 `test_e2e_stop`, +17 `test_stop_gap`, +3 `TestStopHelpersBuildGate` |
+| opendbc `test_elesys_stop` + `test_elesys` | 173 passed | **178 passed**: `test_elesys_stop` 30 -> 35, `test_elesys` 143 on both (its `test_panda_allows_every_flashed_frame` passes on both: the build has the panda library) |
+| every opendbc Honda test (`car/honda/tests`, `sunnypilot/car/honda`) | 375 passed | **380 passed** |
+| `openpilot/sunnypilot` + `openpilot/selfdrive/controls` + `openpilot/selfdrive/car` | 2343 passed, 6 skipped | **2375 passed, 6 skipped** (the +32 above) |
+
+No failure, error or collection error on either side; the same six skips. The three new suites: three runs out of
+three. ruff: clean on both repos (opendbc's own config included). codespell (the repo's settings): no hits in the code
+or in the lines written for push19; the copied reports carry their British spellings as written. No CRLF; no mode
+change (`longitudinal_planner.py` stays 755, the new files 644). No new Params key, no cereal change, no C++.
+
+**The hold removal changes nothing** (stop-gap with `hold_on=False` as designed against the shipped module):
+
+* Module level: 1,896,297 frames - 9,408 point-mass stops (21 rest points x 7 decel caps x 4 gaps x 4 speeds x 4
+  plant and noise variants), 144 with a creeping, reversing or moving-off lead, and 3,400 fuzz streams with every
+  trip, pause, the catch, garbage inputs and the stop entry - give the same accel bit for bit (`float.hex`), the same
+  state on every frame, the old hold flag always False, and log lines that differ only by the old
+  `hold_t=0.00 hold_d=0.00`. Every end reason was hit (entry, camera, planBraking, pullAway, nolead, off, hazardHold,
+  radar, gas, newTrack, leadJump, downhill).
+* Closed loop, the v2b sim itself (real planner, MPC, radard, LongControl and opendbc CarController): the 50 logged
+  queue-stop replays and the 50 logged-plan replays give identical per-frame plan hashes, CAN hashes, traces and rest
+  gaps with the designed module and planner and with push19's (29 of them lifted); the designed arm reproduces the
+  original v2b replay outputs byte for byte. The same for all 1,140 jobs of the v2b safety sims (launch-then-brake,
+  stop-and-go, crawl-launch-brake, cut-ins on the approach and while following, creep-stop, brake to a stop): 0 of
+  1,140 differ (767 of them lifted, 1,273 `stopgap` lines).
+
+### What to check on the next drive (full rlogs needed)
+
+**Each red-light stop with nothing ahead:**
+
+1. The stopping state begins at 0.74-0.80 m/s, 1.5-2.5 s before the wheels read zero, with an `e2estop on` line at
+   that moment. On a grade outside -2.5..+1 degrees it still begins at 0.28 m/s, with no `e2estop` line.
+2. The `hondastop` line shows `firm=N v=0.7x`, with no `max_roll` and no `weak`.
+3. On the flat, the car rests within 0.3 m of the plan's rest point at entry, and within 0.4 m of the HUD figure seen
+   3 s out.
+4. The brake counts do not fall between the entry and wheels-zero.
+5. The grade-removed IMU deceleration at the stop is 0.4-0.65 m/s^2. Compare the jerk against the queue stops'
+   3.3-7.0 m/s^3.
+6. Every `e2estop` entry is followed by rest within 3 s; one that is not is a give-way false positive.
+7. Queue stops are unchanged by Fix A.
+
+**Each queue stop:**
+
+1. Every engagement writes a `stopgap` line, and most end `end=entry`. Count the trips (`camera`, `newTrack`,
+   `pullAway`, `planBraking`).
+2. Lifted stops rest at 4.9-5.6 m on the radar, none below 4.7 m. Stops it did not lift stay at a median of about
+   5.0-5.4 m. The long stops left should be behind a creeping lead or after a hard brake.
+3. The stop entry is still at 0.75-0.79 m/s, with a 0.48-0.68 m roll.
+4. On lifted stops, aTarget is never more than 0.30 above the lowest candidate, and there is no gas or brake take-over
+   in the last 2 s.
+5. Launches from lifted stops are no slower than today's launches from normal stops.
+
+The report's section 4 also asks, before flashing, for the 1,140-pair safety sim re-run with both fixes together and
+for Fix A's give-way scan on the 17f-183 rlogs; their results are in the push19 review, not here.
+
+### Also in this push (documents only)
+
+* `docs/fork/DRIVES-17F-183-2026-11.md` (drives 17f-183: red lights, pull-aways, queue stops),
+  `docs/fork/RED-LIGHT-STOPS-2026-11.md` (the red-light mechanism and Fix A) and `docs/fork/UPSTREAM-2026-10.md` (the
+  2026-10-29 upstream review), each as written, the first two with a note at the top that their fixes shipped here.
+
+---
+
 ## 2026-11-01 — push18: the board engages at once (`7fd409a3`), the lamp board's lean telemetry (`e8854f9e`), lamp-board warnings
 
 You asked for the engage to stop waiting for your hands ("i hate having to let go of the wheel for engage ... i would
