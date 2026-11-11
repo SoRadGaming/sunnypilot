@@ -198,7 +198,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     is_e2e = self.is_e2e(sm)
     # FORK(HONDA_ACCORD_9G_AU): at a red light ask to stop below 0.8 m/s, as the MPC already does behind a lead, once the
-    # model's own plan is below 0.3 m/s 2 s out and the grade is -2.5..+1 deg; latched while should_stop holds. The model's
+    # model's own plan is below 0.1 m/s 2 s out and the grade is -2.5..+1 deg; latched while should_stop holds. The model's
     # own flag passes through untouched; only the e2e candidate's stop flag changes, never an accel (e2e_stop.py)
     if self.e2e_stop is not None:
       orientation = sm['carControl'].orientationNED
