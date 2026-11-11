@@ -20,7 +20,9 @@ is `docs/SP_GATEWAY_FIRMWARE.md`.
 You asked, after the 17f-183 report: "build 1 and 2, push when ready" - 1 being red-light Fix A, 2 the queue stop-gap
 governor (v2b). **Branch `push19`, on push18 (`d510b78c9`): Fix A's planner side with the opendbc bump, the stop-gap
 governor, these documents, then the review's fixes (at rest the red-light stop lets go with the model's own flag, every
-stop-gap engagement logs, the tests the review asked for) and their documents. opendbc branch `push19` (two commits on
+stop-gap engagement logs, the tests the review asked for) and their documents, then your pick from the review
+(2026-11-12): the red-light stop waits for the model's plan to come to rest - under 0.1 m/s two seconds out instead
+of 0.3 - so the give-way it would have stopped at no longer stops (below). opendbc branch `push19` (two commits on
 `14ec02f8`): Fix A's soft stop changes, then the review's docstring and tests. Panda and both boards unchanged. Not
 driven yet.** The details are in `docs/fork/RED-LIGHT-STOPS-2026-11.md` (Fix A) and `docs/fork/DRIVES-17F-183-2026-11.md`
 (sections 1 and 3); what the pre-push review found is under "Review before pushing" below.
@@ -35,22 +37,27 @@ forwarding are not touched.
 **At a red light with nothing ahead** (experimental mode, on a grade between -2.5 and +1 degrees):
 
 * **The stop begins at about 0.8 m/s, 1.5-2.5 s before the wheels stop** - the same path a stop behind a car takes -
-  instead of at 0.28 m/s with the wheels already stopping. Until now only the model could ask to stop there, and it
-  asks only below 0.3 m/s; before that the brake dipped about 50 counts near 1 m/s, the car nearly coasted, crawled
-  for 2.5-4.7 s and then the stop came in with a step ("release, then slam").
+  instead of at 0.28 m/s with the wheels already stopping, once the model's own plan has come to rest (under 0.1 m/s
+  two seconds out). Until now only the model could ask to stop there, and it asks only below 0.3 m/s; before that the
+  brake dipped about 50 counts near 1 m/s, the car nearly coasted, crawled for 2.5-4.7 s and then the stop came in
+  with a step ("release, then slam").
 * **A shorter crawl, and on the flat most of the dip is gone.** Replayed on the five clean red-light stops on record,
-  the car rests a median 0.33 m (0.21-0.85) shorter, and the deceleration as the wheels stop goes from about 0.28 to
-  0.48 m/s^2 (at most 0.59).
+  four rest 0.26-0.85 m shorter (a median 0.33 m over all five), and the deceleration as the wheels stop goes from about
+  0.28 to about 0.43 m/s^2 (the median of the five; 0.48 with the design's 0.3; at most 0.59). The fifth, 161, stays
+  today's stop (below).
 * **Not proven:** whether the last step feels softer. The jerk cannot be simulated; that is what the next drive tests.
 * **Unchanged:** the overrun that builds above 0.8 m/s (most of 17f's), any take-over, and stops on a steeper downhill
   or uphill (outside the band the stop is today's, at 0.28 m/s).
-* **A known side effect at give-ways:** where the model slows to about 0.8 m/s meaning to come to rest and then changes
-  its mind, the car now stops. On the 103 rlog routes with a pitch this happened once with no pedal and no lead: 130,
-  Sun 11 Oct 17:57:59, a right turn at a give-way. The model asked to go 1.7 s after the
-  stop began; the car would have stood still for about a second where it used to roll through at 0.4 m/s. A light
-  that turns green during the crawl (aa, Sat 5 Sep 15:40:13) becomes a short stop and relaunch the same way. A stricter
-  rule (the model's plan below 0.1 m/s 2 s out instead of 0.3) would avoid 130 but costs one of the five red-light
-  stops on record (161) its early entry; that is your choice, and push19 ships the rule as designed.
+* **Give-ways: the stricter rule, your pick.** The stop is asked only once the model's own plan has come to rest - under
+  0.1 m/s two seconds out, not the design's 0.3. With 0.3 the review found one give-way where the car would have stopped
+  hands-off: 130, Sun 11 Oct 17:57:59, a right turn with no lead and no pedal, where the model slowed to 0.78 m/s
+  meaning to creep through (its plan was 0.18 m/s two seconds out) and asked to go 1.7 s later; the car would have stood
+  still for about a second where it rolled through at 0.4 m/s. With 0.1 it does not stop there, and a test now replays
+  those frames. What it costs: 161 (Thu 29 Oct, a red light behind a car pulling away), whose plan stayed at 0.14-0.21
+  m/s two seconds out, gets no early entry and stops as today, at 0.29 m/s - the replay had it 0.21 m shorter, with 0.41
+  m/s^2 as the wheels stop instead of 0.26; and 170 enters a little later, at about 0.6 m/s instead of 0.76, which gives
+  back 0.06-0.09 m of its shorter stop (below). A light that turns green during the crawl (aa, Sat 5 Sep 15:40:13) still
+  becomes a short stop and relaunch: there the model did plan to come to rest (0.04 m/s two seconds out).
 
 **Behind a stopped car, after a gentle arrival** (the model leading, a crawling queue, a short hop):
 
@@ -73,7 +80,8 @@ stop now lets go with the model's own flag, as push18 does.)
 
 * **Fix A** (`openpilot/sunnypilot/selfdrive/controls/lib/e2e_stop.py`, `FORK(HONDA_ACCORD_9G_AU)`): the experimental
   mode candidate also asks to stop when the speed is below 0.8 m/s and the model's accel below 0.1 (the rule the MPC
-  already uses behind a car), the model's own plan is below 0.3 m/s two seconds out, and the pitch is between -0.044 and
+  already uses behind a car), the model's own plan has come to rest - below 0.1 m/s two seconds out (the design said
+  0.3, modeld's own stop speed; the review's give-way finding made it 0.1) - and the pitch is between -0.044 and
   +0.0175 rad. Once on it stays on while that rule holds, and lets go when the model asks to go or the car is back above
   0.8 m/s. At rest (below 0.1 m/s) the model's own flag decides: no new latch, and a latch lets go with that flag. modeld
   computes its flag on the unsmoothed accel but publishes the smoothed one, so its flag drops first at a green light,
@@ -134,6 +142,13 @@ With the review's fixes (sunnypilot `e9eb543b6`, opendbc `be96a51b`): the five s
 openpilot suite (`tools/test_runner.py -j 12`, CI's unit-test collection) **3637 passed, 45 skipped, 1 xfailed, 0
 failed** - the first build's 3623 and the 14 new tests.
 
+With the 0.1 m/s plan rule (sunnypilot `0bc37d7dd`, opendbc unchanged at `be96a51b`): the five suites **158 passed**
+(`test_e2e_stop` 14: the constant at 0.1; a plan just under 0.1 fires, 0.1, 0.18 and 0.16 m/s two seconds out do
+not; the fixture's 161 stop is now the model's own; the 130 give-way frames latch with 0.3 and not with 0.1); opendbc
+`test_elesys_stop` + `test_elesys` **181**; `openpilot/sunnypilot` + `openpilot/selfdrive/controls` +
+`openpilot/selfdrive/car` **2390 passed, 6 skipped**. Each threshold mutant (0.3, 0.2, 0.15, 0.05, `<=` for `<`)
+fails at least one test with the constant's own pin left out.
+
 No failure, error or collection error on either side; the same six skips. The three new suites: three runs out of
 three. ruff: clean on both repos (opendbc's own config included). codespell (the repo's settings): no hits in the code
 or in the lines written for push19; the copied reports carry their British spellings as written. No CRLF; no mode
@@ -159,7 +174,9 @@ change (`longitudinal_planner.py` stays 755, the new files 644). No new Params k
 **Each red-light stop with nothing ahead:**
 
 1. The stopping state begins at 0.74-0.80 m/s, 1.5-2.5 s before the wheels read zero, with an `e2estop on` line at
-   that moment. On a grade outside -2.5..+1 degrees it still begins at 0.28 m/s, with no `e2estop` line.
+   that moment, when the model's plan has come to rest by then (12b, 142). Where the plan comes to rest later the line
+   comes later (170: about 0.6 m/s); where it never does (161) there is no line and the stop is today's, at 0.28 m/s.
+   On a grade outside -2.5..+1 degrees it still begins at 0.28 m/s, with no `e2estop` line.
 2. The `hondastop` line shows `firm=N v=0.7x`, with no `max_roll` and no `weak`.
 3. On the flat, the car rests within 0.3 m of the plan's rest point at entry, and within 0.4 m of the HUD figure seen
    3 s out.
@@ -168,7 +185,8 @@ change (`longitudinal_planner.py` stays 755, the new files 644). No new Params k
    3.3-7.0 m/s^3.
 6. Every `e2estop` line is followed by wheels-zero within 3 s; one that is not is a give-way false positive. Look at
    the `e2estop` lines at turns and give-ways in particular: the five newest drives had no slow roll-through at all,
-   so they could not measure how often it happens (the older routes: 3 of 8 roll-throughs latched, 1 of them hands-off).
+   so they could not measure how often it happens (the older routes: with 0.3, 3 of 8 roll-throughs latched, 1 of
+   them a hands-off give-way; with 0.1 only aa does, a light that turned green during the crawl).
 7. Queue stops are unchanged by Fix A.
 8. Launches from a red-light stop leave the stopping state on the same plan as the model's own flag drops (no
    `e2estop` line at a standstill; the first build's 0.10-0.14 s hold is gone).
@@ -208,11 +226,33 @@ on the newest rlogs. Both were run on the built trees, with a logged-stop replay
   nothing touches; the v2b sims had not covered experimental-off stop-and-go.
 * **Give-way scan** (push19's own module on every planner frame of 114 rlog routes, 103 with a pitch, 15.6 engaged
   hours): 235 latches; 124 at rest and 53 behind a lead changed nothing; 14 red-light and short no-lead stops; 2
-  roll-throughs (130 and aa, above). On 17f-183: 32 latches, 0 false, but no roll-through to test against.
-* **Logged stops, both fixes:** every red-light number above is reproduced; on queue stops push19 equals stop-gap alone
-  on 49-50 of 50 with the plant the v2b replay used. That plant ignores brake counts in the stopping state, so Fix A's
-  firm-up cannot move it there; on a plant driven by the counts the firm-up moves a stop's rest by -0.06..+0.22 m, never
-  brings a lifted stop closer, and every lifted stop rests at 4.82 m or more.
+  roll-throughs (130 and aa, above). On 17f-183: 32 latches, 0 false, but no roll-through to test against. That scan
+  used the 0.3 rule; the 0.1 rule's is the point after next.
+* **Logged stops, both fixes:** every red-light number of the 0.3 build's report is reproduced; on queue stops push19
+  equals stop-gap alone on 49-50 of 50 with the plant the v2b replay used. That plant ignores brake counts in the
+  stopping state, so Fix A's firm-up cannot move it there; on a plant driven by the counts the firm-up moves a stop's
+  rest by -0.06..+0.22 m, never brings a lifted stop closer, and every lifted stop rests at 4.82 m or more.
+* **The 0.1 m/s plan rule (your pick, the review's option b).** Fix A's module with 0.1 on the same 2,764,746 planner
+  frames (identical at a 2 ms lag): 110 -> 103 `e2estop` lines, and no frame asks to stop where the 0.3 build did not
+  (it can only latch later or not at all). 130 113.9 (the give-way), de 518.6 (a roll-through behind a lead) and 9f
+  306.4 (a right-turn stop the car made anyway, now on the model's own flag 0.9 s later) no longer latch; every other
+  no-lead red light and short stop latches on the same frame, aa 437.8 too. 161 145.8 loses its early entry: the model's
+  own stop at 0.29 m/s, 1.8 s later, so the replay's 0.21 m (0.14-0.26) and 0.41 m/s^2 at wheels-zero go back to today's
+  (re-running the replay's sim with the entry there: 0.01 m, 0.23 m/s^2). 170 (a qlog, 2 Hz) latches one model frame
+  later, at 0.61 m/s instead of 0.76; the same sim gives 0.26 m saved (0.22-0.30) and 0.43 m/s^2 at wheels-zero, against
+  0.32 m and 0.50 entered at the 0.3 build's own 2 Hz latch (the report's 0.26 m and 0.51 entered at the 0.8 m/s
+  crossing); a second replay, its plant fitted at each latch, gives 0.29 -> 0.20 m and 0.48 -> 0.40. So the later latch
+  costs 0.06-0.09 m; the 20 Hz latch falls somewhere between the two frames. Three more latches drop: 12b 231.6 and 181
+  531.1, where the MPC's rule or the model's flag already had the stop, and 20 3323.6, a queue stop on a turn on an old
+  build, now on the model's own flag 1.85 s later. 30 come later, by 1-26 plans: 17 where the MPC's own rule already had
+  the stop, the rest on builds before push17 except 178 1695.7, where the latch had begun a creeping-lead stop 2 plans
+  before the MPC's rule (the replay's one Fix A difference on queue stops, 178_1696.9); now the MPC's rule begins it.
+  The closed-loop safety sims, the logged-stop replays and the process replay of 182 in this section ran on the 0.3
+  build. Re-run on the 0.1 build: no touch in the 1,140 safety-sim pairs (none with push18 either) and the same worst
+  cases as the 0.3 build; the process replays of 182 and 17f give the 0.3 build's longitudinalPlan, carControl,
+  controlsState and sendcan exactly; the logged-stop replays of 12b, 142 and 17f are unchanged; the CI unit-test job
+  passes 3638 (46 skipped, 1 xfailed; on its first run test_params_gps and test_big_log timed out, and alone they pass 3
+  of 3 here and on push18).
 * **Code review**, fixed in this push: the at-rest launch hold above; stop-gap engagements that ended at a standstill
   or above 9 km/h wrote no line (now `end=standstill` / `end=fast`); the gates the tests claimed to pin but did not
   (camera probability, range jump, crash count, the queue moving off on speed, the profile cap, the catch bound, the

@@ -1,8 +1,9 @@
 # Red-light rolling: why the car stops past the plan (2026-11-04)
 
 > **Shipped in push19 (2026-11-11):** Fix A (section 4) is on branch `push19` (sunnypilot `e2e_stop.py` and the
-> planner hook) with opendbc `push19` (the soft stop's firm-up and MAX_ROLL by entry speed), exactly as designed,
-> grade band -0.044..+0.0175 rad unchanged, plus one `e2estop on v= a= deg= model=` log line per engagement.
+> planner hook) with opendbc `push19` (the soft stop's firm-up and MAX_ROLL by entry speed), as designed - grade band
+> -0.044..+0.0175 rad unchanged - except that after the review the plan rule is 0.1 m/s, not 0.3 (corrections
+> below), plus one `e2estop on v= a= deg= model=` log line per engagement.
 > It ships together with the queue-stop governor from `DRIVES-17F-183-2026-11.md` section 3c (its dormant hold path
 > removed). The next-drive checks are in `docs/CHANGELOG_SERIAL_STEERING.md` (push19). The text below is the report
 > as written before the build.
@@ -13,8 +14,19 @@
 >   car would have stood still at that give-way (right turn, no lead) from about +1.0 s to +2.1 s. 161 at 81.8 s no
 >   longer latches (+2.33 deg, outside the grade band). Over 103 rlog routes with a pitch the rule latched on 3 of 8
 >   slow roll-throughs (130, aa 437.8 - a light that turned green during the crawl - and de 518.6 behind a lead with the
->   gas 0.2 s later). The section 4.5 option, the plan below 0.1 m/s at 2 s, removes 130 and keeps every no-lead red
->   light and short stop on the same frame (plus or minus one), but 161 145.8 loses its early entry; push19 ships 0.3.
+>   gas 0.2 s later).
+> * **Section 4.5's option was taken: the plan must be below 0.1 m/s at 2 s, not 0.3** (the owner's choice after the
+>   review, 2026-11-12; `E2E_STOP_PLAN_V`). The give-way case no longer latches: at 130 113.9 the plan was 0.18 m/s 2 s
+>   out, and a test now replays those frames (they latch with 0.3, not with 0.1). Over the 114 rlog routes de 518.6 and
+>   9f 306.4 no longer latch either; every other no-lead red light and short stop latches on the same frame, and aa
+>   437.8 still does (its plan was 0.04 m/s). What is lost: **161 145.8** (the stop at 147.6, behind a lead pulling
+>   away, plan 0.14-0.21 m/s 2 s out) gets no early entry and is today's stop, the model's own at 0.29 m/s - the 0.21 m
+>   (0.14-0.26) the replay saved there and its 0.41 m/s^2 at wheels-zero (0.26 today) are gone; and **170** (qlog)
+>   latches one 2 Hz model frame later, 0.61 m/s instead of 0.76: 0.26 m saved in the replay's sim against 0.32 entered
+>   at the 0.3 build's own latch (the table's 0.26 entered at the 0.8 m/s crossing), and 0.29 -> 0.20 in a second replay
+>   with its plant fitted at each latch. In section 4 read the rule's "0.3 m/s at 2 s" as 0.1; in 4.3's table 161's row
+>   is today's stop (the replay's sim with the entry at its 0.29 m/s: 0.01 m saved, 0.23 m/s^2 at wheel-zero) and 170's
+>   is 0.26 m (0.22-0.30), 0.29 -> 0.43.
 > * **At rest** the latch now lets go with the model's own flag below 0.1 m/s: modeld computes that flag on the
 >   unsmoothed accel and publishes the smoothed one, so a latch held on the smoothed accel delayed launches by up to
 >   0.14 s (4 of 21 on 182).
