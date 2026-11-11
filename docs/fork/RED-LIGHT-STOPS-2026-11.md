@@ -6,6 +6,18 @@
 > It ships together with the queue-stop governor from `DRIVES-17F-183-2026-11.md` section 3c (its dormant hold path
 > removed). The next-drive checks are in `docs/CHANGELOG_SERIAL_STEERING.md` (push19). The text below is the report
 > as written before the build.
+>
+> **Corrections from the push19 review (2026-11-11):**
+> * **Section 4.4, "the owner was on the gas both times"** is not true of 130 at 113.9 s: no pedal until the gas at
+>   +2.56 s, 0.86 s after the model's own go at +1.70 s, so the gas would not have prevented the stop. With Fix A the
+>   car would have stood still at that give-way (right turn, no lead) from about +1.0 s to +2.1 s. 161 at 81.8 s no
+>   longer latches (+2.33 deg, outside the grade band). Over 103 rlog routes with a pitch the rule latched on 3 of 8
+>   slow roll-throughs (130, aa 437.8 - a light that turned green during the crawl - and de 518.6 behind a lead with the
+>   gas 0.2 s later). The section 4.5 option, the plan below 0.1 m/s at 2 s, removes 130 and keeps every no-lead red
+>   light and short stop on the same frame (plus or minus one), but 161 145.8 loses its early entry; push19 ships 0.3.
+> * **At rest** the latch now lets go with the model's own flag below 0.1 m/s: modeld computes that flag on the
+>   unsmoothed accel and publishes the smoothed one, so a latch held on the smoothed accel delayed launches by up to
+>   0.14 s (4 of 21 on 182).
 
 **Labels**
 * **M** = measured. A stop id is the route hex plus seconds from route start. Local times are AEDT (UTC+11), except routes from before 02:00 on 4 Oct, which are AEST.
