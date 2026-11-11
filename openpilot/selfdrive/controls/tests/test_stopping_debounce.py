@@ -3,18 +3,23 @@
 longcontrol.py is a core file that every car goes through, so the properties that matter
 most are that with the toggle off the state machine is upstream's, and that a car not in
 stopping_tune.py gets upstream's stopping speed (0.3 m/s) and ramp (1.0 m/s^3).
+
+TestStopHelpersBuildGate: the planner's red-light stop entry (e2e_stop.py) and queue-stop governor
+(stop_gap.py) are built only under the soft stop's gate, and each changes only what it may.
 """
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from opendbc.car.structs import car
-from openpilot.cereal import custom
+from opendbc.sunnypilot.car.honda.values_ext import HondaFlagsSP
+from openpilot.cereal import custom, log, messaging
 from openpilot.common.params import Params
-from openpilot.common.realtime import DT_CTRL
+from openpilot.common.realtime import DT_CTRL, DT_MDL
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.selfdrive.controls.lib import longcontrol as lc
 from openpilot.selfdrive.controls.lib.drive_helpers import should_stop
+from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.sunnypilot.selfdrive.controls.lib.stopping_tune import STOPPING_SPEED, STOPPING_DECEL_RATE
 
 LongCtrlState = lc.LongCtrlState
@@ -197,3 +202,118 @@ class TestStoppingTune(OpenpilotTestCase):
       CP.carFingerprint = fingerprint
       planner = LongitudinalPlanner(CP, custom.CarParamsSP.new_message().as_reader())
       assert planner.v_ego_stopping == expected
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# FORK(HONDA_ACCORD_9G_AU): the planner's two stop helpers, the red-light stop entry (e2e_stop.py) and the queue-stop
+# governor (stop_gap.py), share the soft stop's build gate: this car, openpilot longitudinal, stock ACC mode off and
+# HondaDynamicTuningEnabled on. Everywhere else both are None and the planner is upstream's.
+
+class _SM(dict):
+  def __init__(self, services):
+    super().__init__(services)
+    self.valid = dict.fromkeys(services, True)
+    self.logMonoTime = dict.fromkeys(services, 0)
+    self.updated = dict.fromkeys(services, True)
+    self.recv_frame = dict.fromkeys(services, 1)
+
+  def all_checks(self, service_list=None) -> bool:
+    return True
+
+
+def _plan_to_rest(v0, rest_t):
+  t = np.array(ModelConstants.T_IDXS)
+  return [float(x) for x in np.clip(v0 * (1 - t / rest_t), 0, None)]
+
+
+def _sm(v_ego, e2e_accel, plan_vx, lead_d=None, pitch=0.0):
+  """One plannerd frame, engaged in experimental mode: a stopped radar lead (track 7) at lead_d with the camera agreeing,
+  or no lead at all."""
+  services = {}
+  for service in ("vehicleParameters", "carStateSP", "liveMapDataSP", "gpsLocationExternal", "gpsLocation"):
+    services[service] = getattr(messaging.new_message(service), service)
+  rs = messaging.new_message('radarState')
+  if lead_d is not None:
+    lead = rs.radarState.leadOne
+    lead.present, lead.dRel, lead.vLead, lead.vLeadK, lead.vRel, lead.modelProb = True, lead_d, 0.0, 0.0, -v_ego, 1.0
+    lead.aLeadK, lead.aLeadTau = 0.0, 1.5
+    lead.radar, lead.radarTrackId = True, 7
+  services['radarState'] = rs.radarState.as_reader()
+  cs = messaging.new_message('carState')
+  cs.carState.vEgo, cs.carState.aEgo = v_ego, e2e_accel
+  cs.carState.vCruise = cs.carState.vCruiseCluster = 50.0
+  services['carState'] = cs.carState.as_reader()
+  ctl = messaging.new_message('controlsState')
+  ctl.controlsState.longControlState = LongCtrlState.pid
+  services['controlsState'] = ctl.controlsState.as_reader()
+  ss = messaging.new_message('selfdriveState')
+  ss.selfdriveState.experimentalMode = True
+  ss.selfdriveState.enabled = True
+  ss.selfdriveState.personality = log.LongitudinalPersonality.standard
+  services['selfdriveState'] = ss.selfdriveState.as_reader()
+  cc = messaging.new_message('carControl')
+  cc.carControl.enabled = True
+  cc.carControl.orientationNED = [0.0, pitch, 0.0]
+  services['carControl'] = cc.carControl.as_reader()
+  m = messaging.new_message('modelV2')
+  m.modelV2.orientationRate.z = [0.01] * 33   # nonzero: a straight path divides by zero in SCC vision
+  m.modelV2.velocity.x = plan_vx
+  m.modelV2.position.x = [float(i) for i in range(33)]
+  m.modelV2.action.desiredAcceleration = e2e_accel
+  if lead_d is not None:
+    m.modelV2.init('leadsV3', 1)
+    cam = m.modelV2.leadsV3[0]
+    cam.prob = 0.9
+    cam.x = [lead_d + 1.52 - 0.45] * 6          # radard's RADAR_TO_CAMERA, reading 0.45 m short as it usually does
+  services['modelV2'] = m.modelV2.as_reader()
+  return _SM(services)
+
+
+def _planner(toggle=True, fingerprint=THIS_CAR, brand='honda', op_long=True, stock_acc=False, init_v=0.0):
+  # imported here: the planner builds the longitudinal MPC, which needs the compiled solver
+  from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
+  Params().put_bool("HondaDynamicTuningEnabled", toggle, block=True)
+  CP = car.CarParams.new_message()
+  CP.brand, CP.carFingerprint, CP.openpilotLongitudinalControl = brand, fingerprint, op_long
+  CP.steerRatio, CP.wheelbase, CP.longitudinalActuatorDelay = 15.0, 2.7, 0.6
+  CP_SP = custom.CarParamsSP.new_message()
+  if stock_acc:
+    CP_SP.flags = HondaFlagsSP.ELESYS_STOCK_ACC.value
+  return LongitudinalPlanner(CP, CP_SP.as_reader(), init_v=init_v)
+
+
+class TestStopHelpersBuildGate(OpenpilotTestCase):
+  def test_built_only_under_the_soft_stops_gate(self):
+    from openpilot.sunnypilot.selfdrive.controls.lib.e2e_stop import E2EStopEntry
+    from openpilot.sunnypilot.selfdrive.controls.lib.stop_gap import StopGap
+    pl = _planner()
+    assert isinstance(pl.e2e_stop, E2EStopEntry) and pl.e2e_stop.v_ego_stopping == 0.8
+    assert isinstance(pl.stop_gap, StopGap) and pl.stop_gap.v_stopping == 0.8 and pl.stop_gap.dt == DT_MDL
+    for kw in ({'toggle': False}, {'stock_acc': True}, {'op_long': False}, {'fingerprint': OTHER_CAR},
+               {'fingerprint': 'TOYOTA_COROLLA_TSS2', 'brand': 'toyota'}):
+      pl = _planner(**kw)
+      assert pl.e2e_stop is None and pl.stop_gap is None, kw
+
+  def test_a_red_light_stop_is_asked_at_0_8_m_s_and_no_accel_changes(self):
+    # no lead, cruise set above the speed: 1 s of approach (cruise's accel climbs off its 0.0 start), then a frame at
+    # 0.79 m/s with the model's plan at rest within 1.5 s
+    approach = [_sm(1.2, -0.4, _plan_to_rest(1.2, 4.0))] * 20
+    for pitch, fires in ((0.0, True), (-0.06, False)):           # outside the grade band it is today's stop
+      on, off = _planner(init_v=1.2), _planner(toggle=False, init_v=1.2)
+      for frame in approach + [_sm(0.79, -0.4, _plan_to_rest(0.79, 1.5), pitch=pitch)]:
+        on.update(frame)
+        off.update(frame)
+        assert float(on.output_a_target) == float(off.output_a_target), "the stop entry changes the stop flag only"
+      assert not off.output_should_stop, "upstream's e2e stop waits for 0.3 m/s"
+      assert on.output_should_stop == fires, pitch
+
+  def test_a_gentle_queue_stop_is_lifted_by_at_most_the_allowance(self):
+    from openpilot.sunnypilot.selfdrive.controls.lib import stop_gap as SG
+    on, off = _planner(init_v=1.5), _planner(toggle=False, init_v=1.5)
+    frame = _sm(1.5, -0.6, _plan_to_rest(1.5, 3.0), lead_d=9.0)
+    on.update(frame)
+    off.update(frame)
+    lift = float(on.output_a_target) - float(off.output_a_target)
+    assert 0.0 < lift <= SG.LIFT_RATE * DT_MDL + 1e-6, lift
+    assert on.output_should_stop == off.output_should_stop
+    assert on.stop_gap.engaged and abs(on.stop_gap.lift - lift) < 1e-9

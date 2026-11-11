@@ -24,6 +24,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.reentry_ramp import ReentryRamp
 from openpilot.common.params import Params  # FORK(CLOSE-FOLLOW)
 from openpilot.sunnypilot.selfdrive.controls.lib.close_follow import CloseFollow, close_follow_applies, read_mode  # FORK(CLOSE-FOLLOW)
 from openpilot.sunnypilot.selfdrive.controls.lib.lead_brake_assist import lead_brake_planner  # FORK(LEAD-BRAKE)
+from openpilot.sunnypilot.selfdrive.controls.lib.stop_gap import StopGap, stop_gap_applies  # FORK(STOP-GAP)
 
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
@@ -97,6 +98,11 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # FORK(LEAD-BRAKE): brake sooner when the lead brakes hard (lead_brake_assist.py). None on every other car, in stock
     # ACC mode and with LeadBrakeAssistMode 0, which keeps upstream's plan bit for bit.
     self.lead_brake = lead_brake_planner(CP, CP_SP, dt)
+    # FORK(STOP-GAP): a gentle queue stop finishes at the normal distance (stop_gap.py): below 2.5 m/s behind a stopped,
+    # radar-tracked, camera-confirmed lead the plan may be raised by at most 0.3 m/s^2 toward a landing at 5.2 m. The stop
+    # itself is today's - the same 0.8 m/s entry, never deferred. None on every other car, in stock ACC mode and with
+    # HondaDynamicTuningEnabled off (no soft stop), which keeps upstream's plan bit for bit.
+    self.stop_gap = StopGap(self.v_ego_stopping, dt) if (self.v_ego_stopping is not None and stop_gap_applies(CP, CP_SP)) else None
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -238,6 +244,20 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
                                                  min(output_a_target_mpc, float(np.min(self.a_desired_trajectory))),
                                                  self.fcw, self.mpc.crash_cnt, sm['carState'].gasPressed,
                                                  lead_decel((radar_state.leadOne, radar_state.leadTwo)))
+    # FORK(STOP-GAP): after the min() and the re-entry ramp, before shouldStop. Changes the plan's accel only (raised by at
+    # most 0.3 m/s^2; after a lift, the catch lowers it by at most as much); the candidates' stop flags are never touched.
+    if self.stop_gap is not None:
+      md = sm['modelV2']
+      cam = md.leadsV3[0] if len(md.leadsV3) else None
+      ned = sm['carControl'].orientationNED
+      output_a_target = self.stop_gap.update(not reset_state, v_ego, output_a_target,
+                                             output_should_stop_mpc or cruise_should_stop, sm['radarState'].leadOne,
+                                             cam.prob if cam is not None else 0.0,
+                                             cam.x[0] if (cam is not None and len(cam.x)) else float('nan'),
+                                             sm['carState'].standstill, ned[1] if len(ned) == 3 else 0.0,
+                                             self.fcw, self.mpc.crash_cnt, sm['carState'].gasPressed)
+      if self.stop_gap.log_line is not None:
+        cloudlog.info(self.stop_gap.log_line)
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
 
