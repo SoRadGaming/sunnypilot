@@ -57,6 +57,14 @@ THREE KINDS OF 'NO':
     reversing (vLead < LEAD_V_MIN) or still braking (aLeadK < LEAD_A_MIN); the plan under A_PLAN_TRIP before anything
     was lifted (a brisk approach, which needs nothing).
 
+LOG: one `stopgap end= arm_v= arm_gap= max_lift= catch=` line per engagement (plannerd's cloudlog), when it lets go:
+  the stop entry   `entry`, or the pause in force on that plan: `hazardHold`, `leadMoving`, `leadReversing`,
+                   `leadBraking`, `leadPulling` (an engaged plan under A_PLAN_TRIP is a trip before it can be a pause)
+  rest / fast      `standstill`: the car came to rest before the MPC's or cruise's 0.8 m/s rule fired (the model's own
+                   flag or the red-light entry, e2e_stop.py, began the stop); `fast`: back above V_ARM
+  trips            `radar`, `nolead`, `newTrack`, `leadJump`, `camera`, `downhill`, `planBraking`, `pullAway`, `gas`, `off`
+  `error`          an exception: the plan passed through
+
 Built only for this car with openpilot longitudinal, stock ACC mode off and HondaDynamicTuningEnabled on - the soft
 stop's own gate - (stop_gap_applies). Every other car and stock ACC: None, upstream's plan bit for bit.
 """
@@ -233,8 +241,9 @@ class StopGap:
       else:
         self.since_hazard += self.dt
       if not active or gas or standstill or v > V_ARM:
-        if self.engaged and not self.spent and (not active or gas):
-          self._let_go('off' if not active else 'gas')
+        # every engagement writes its line; at rest or above V_ARM that is all _let_go() changes, since _rearm() follows
+        if self.engaged and not self.spent:
+          self._let_go('off' if not active else 'gas' if gas else 'standstill' if standstill else 'fast')
         if standstill or v > V_ARM or not active:   # re-arm for the next stop
           self._rearm()
         return a

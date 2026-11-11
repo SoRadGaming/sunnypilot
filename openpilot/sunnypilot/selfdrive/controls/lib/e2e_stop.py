@@ -15,15 +15,28 @@ model itself means to stop, not to crawl on. Once on it stays on (latched) for a
 that recedes as the car slows cannot drop the stop at 0.5 m/s; it lets go the moment the model's accel reaches 0.1 or
 the car is back above 0.8 m/s, which is when the MPC's own rule would. The model's own flag is passed through untouched.
 
+AT REST (v_ego < E2E_STOP_STILL_V) the model's own flag decides: the latch is kept only while that flag is on, and no new
+latch is taken. modeld computes its flag from the same rule (v < 0.3, accel < 0.1) on the UNSMOOTHED accel but publishes
+the smoothed desiredAcceleration, so at a green light its flag drops 1-4 plans (up to ~0.3 s) before the smoothed accel
+reaches 0.1; a latch held on the smoothed accel would hold the stop - and delay the launch - by that much (replayed on
+182: 4 of 21 launches 0.10-0.14 s later). Below 0.1 m/s the stop is already made, so the launch is push18's exactly.
+Not at 0.3 m/s: modeld's speed lags, and on the final roll its flag comes on a plan late (12b, 142).
+
 Measured on every rlog route with modelV2 (45 routes, d1..161): on true stops it fires at 0.77-0.80 m/s, the same moment
-the MPC's rule fires behind a lead; it never fired on an approach that went on to keep rolling (161 126.9 s, where the
-plain v<0.8/a<0.1 rule would have, has the plan at 0.84 m/s 2 s out). Built only on this car with openpilot longitudinal,
-stock ACC mode off and HondaDynamicTuningEnabled on - the switch the soft stop is built with - because without the soft
-stop's ceiling an earlier stopping state is the old harsh stop (0.92 m/s^2 at rest). Every other car: None, upstream.
+the MPC's rule fires behind a lead. On those routes it fired on one approach that went on to keep rolling: 130 113.9 s,
+a give-way at a right turn with no lead and no pedal, where the model's plan was 0.18 m/s 2 s out and it asked to go
+1.7 s later - with this rule the car would stand still there for about a second. Across the 103 rlog routes with a
+pitch it fired on 3 of the 8 slow roll-throughs: 130 113.9, aa 437.8 (a light that turned green during the crawl) and
+de 518.6 (behind a lead, the driver's gas 0.2 s later). 161 126.9 s, where the plain v<0.8/a<0.1 rule would have fired,
+has the plan at 0.84 m/s 2 s out; 161 81.8 s is outside the grade band (+2.3 deg). Built only on this car with openpilot
+longitudinal, stock ACC mode off and HondaDynamicTuningEnabled on - the switch the soft stop is built with - because
+without the soft stop's ceiling an earlier stopping state is the old harsh stop (0.92 m/s^2 at rest). Every other car:
+None, upstream.
 
 LOG: one `e2estop on v= a= deg= model=` line per engagement, on the frame it latches (plannerd's cloudlog, which reaches
 the route as a logMessage): the speed and the model's accel at the latch, the grade in degrees, and whether the model's
-own flag was already on. It is written after the latch is decided and cannot change it.
+own flag was already on. It is written after the latch is decided and cannot change it. It never latches at rest, so
+an engagement at a standstill writes no line.
 """
 import math
 
@@ -36,6 +49,8 @@ from openpilot.sunnypilot.selfdrive.controls.lib.reentry_ramp import reentry_ram
 
 E2E_STOP_PLAN_T = 2.0      # s: how far out the model's plan must already be below E2E_STOP_PLAN_V
 E2E_STOP_PLAN_V = 0.3      # m/s: the model's own stop speed (modeld: v_ego < 0.3)
+E2E_STOP_STILL_V = 0.1     # m/s: below this the model's own flag decides (the same rule on the unsmoothed accel): no new
+                           # latch, and a latch lets go with that flag, so a launch is not held back by the smoothing
 # The grade band (carControl.orientationNED pitch, nose-up positive) the early stop is asked in. The stopping state's
 # target is stopAccel -0.8 on the flat and carries no grade term: on a downhill steeper than ~2.5 deg it holds less than
 # the PID's integrator would (replayed: 1.04-1.45 m from 0.8 m/s at -2..-3 deg against 0.8-0.95 on the flat), and on an
@@ -74,12 +89,15 @@ class E2EStopEntry:
 
   def update(self, v_ego: float, a_target_e2e: float, model_should_stop: bool, plan_vx, active: bool, pitch=None) -> bool:
     """The e2e candidate's should_stop. `active`: experimental mode (is_e2e) and long control not reset. `pitch`: rad,
-    nose-up positive; the stop is only latched ON inside the grade band (once on, a grade change does not drop it)."""
+    nose-up positive; the stop is only latched ON inside the grade band (once on, a grade change does not drop it).
+    At rest (v_ego < E2E_STOP_STILL_V) the model's own flag decides: no new latch, and a latch lets go with that flag."""
     self.log_line = None
     was_latched = self.latched
     try:
       if not active or not should_stop(v_ego, a_target_e2e, v_ego_stopping=self.v_ego_stopping):
         self.latched = False
+      elif v_ego < E2E_STOP_STILL_V:
+        self.latched = self.latched and bool(model_should_stop)
       elif not self.latched:
         self.latched = grade_ok(pitch) and plan_comes_to_rest(plan_vx)
     except Exception:

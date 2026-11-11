@@ -1,7 +1,8 @@
 """FORK(HONDA_ACCORD_9G_AU): the red-light stop entry (e2e_stop.py).
 
 The unit tests pin the rule (v < STOPPING_SPEED, the model's accel < 0.1, the model's plan below 0.3 m/s 2 s out), the
-latch and its release, the grade band, that the model's own flag always passes through, that it never raises, the one
+latch and its release (at rest, the model's own flag decides), the grade band, that the model's own flag always passes
+through, that it never raises, the one
 log line per engagement, the build gate (e2e_stop_applies), and a replay of the logged approaches (fixture). The
 planner's build gate is in selfdrive/controls/tests/test_stopping_debounce.py.
 """
@@ -42,7 +43,7 @@ def crawl(v):
 
 class TestE2EStopEntry(OpenpilotTestCase):
   def test_constants(self):
-    self.assertEqual((e.E2E_STOP_PLAN_T, e.E2E_STOP_PLAN_V), (2.0, 0.3))
+    self.assertEqual((e.E2E_STOP_PLAN_T, e.E2E_STOP_PLAN_V, e.E2E_STOP_STILL_V), (2.0, 0.3, 0.1))
     self.assertEqual((e.E2E_STOP_PITCH_MIN, e.E2E_STOP_PITCH_MAX), (-0.044, 0.0175))
     self.assertEqual(V_STOP, 0.8)
 
@@ -52,11 +53,12 @@ class TestE2EStopEntry(OpenpilotTestCase):
     self.assertTrue(step(s, 0.79, -0.5, False, plan(0.79, 1.5), True))
 
   def test_a_plan_that_does_not_come_to_rest_never_fires(self):
-    for vx in (crawl(0.5), crawl(0.31), plan(0.79, 4.0), [], [0.0] * 32, [math.nan] * 33, None, "plan"):
+    for vx in (crawl(0.5), crawl(0.31), crawl(0.3), plan(0.79, 4.0), [], [0.0] * 32, [0.0] * 34, [math.nan] * 33, None, "plan"):
       with self.subTest(vx=vx if not isinstance(vx, list) else len(vx)):
         s = e.E2EStopEntry(V_STOP)
         for _ in range(40):
           self.assertFalse(step(s, 0.6, -0.4, False, vx, True))
+        self.assertFalse(e.plan_comes_to_rest(vx))         # the helper itself answers False (0.3 is not below 0.3), never raises
 
   def test_the_accel_rule_and_the_gate(self):
     for a, active in ((0.1, True), (0.5, True), (-0.5, False), (math.nan, True)):
@@ -75,6 +77,32 @@ class TestE2EStopEntry(OpenpilotTestCase):
     self.assertFalse(step(s, 0.85, -0.3, False, plan(0.4, 1.0), True))          # back above 0.8
     self.assertTrue(step(s, 0.7, -0.3, False, plan(0.7, 1.0), True))
     self.assertFalse(step(s, 0.7, -0.3, False, plan(0.7, 1.0), False))          # disengaged / chill mode
+
+  def test_at_rest_the_models_own_flag_decides(self):
+    # modeld's flag is the same rule on the UNSMOOTHED accel, and at a green light it drops before the smoothed accel
+    # reaches 0.1: below E2E_STOP_STILL_V the latch lets go with it (held on the smoothed accel, 4 of 21 launches on 182
+    # left the stopping state 0.10-0.14 s later than push18's)
+    s = e.E2EStopEntry(V_STOP)
+    self.assertTrue(step(s, 0.79, -0.4, False, plan(0.79, 1.5), True))          # latched on the approach
+    self.assertTrue(step(s, 0.2, -0.3, False, crawl(0.0), True))                # still rolling: the latch holds the stop
+    self.assertTrue(step(s, 0.0, -0.1, True, crawl(0.0), True))                 # at rest, the model's flag on
+    self.assertTrue(s.latched)
+    self.assertFalse(step(s, 0.0, 0.05, False, crawl(0.0), True))               # its flag drops, accel still under 0.1: released
+    self.assertFalse(s.latched)
+    self.assertFalse(step(s, 0.0, -0.1, False, plan(0.0, 1.0), True))           # and at rest nothing latches again
+    self.assertTrue(step(s, 0.0, -0.1, True, plan(0.0, 1.0), True))             # the model's own flag still passes through
+    self.assertFalse(s.latched)
+    self.assertTrue(step(s, 0.79, 0.05, False, plan(0.79, 1.0), True))          # moving again, a new stop: a new latch
+    # an engagement at a standstill takes no latch and writes no line
+    s = e.E2EStopEntry(V_STOP)
+    self.assertFalse(step(s, 0.0, 0.0, False, crawl(0.0), True))
+    self.assertFalse(s.latched)
+    self.assertIsNone(s.log_line)
+    # 0.1 m/s is not at rest: the latch is taken there as anywhere below 0.8
+    s = e.E2EStopEntry(V_STOP)
+    self.assertTrue(step(s, e.E2E_STOP_STILL_V, -0.2, False, crawl(0.0), True))
+    self.assertTrue(s.latched)
+    self.assertIsNotNone(s.log_line)
 
   def test_the_models_own_flag_always_passes_through(self):
     rng = random.Random(7)

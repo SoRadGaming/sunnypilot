@@ -28,6 +28,28 @@ def step(g, v, a, ld, rule=False, cam=None, standstill=False, pitch=0.0, fcw=Fal
                   pitch, fcw, crash, gas)
 
 
+def close_in(g, v, gap0, a_fn, n, **kw):
+  """n plans at a constant v, the gap to a stopped lead closing by v*DT each (vRel = -v: the radar range continues, so
+  nothing trips on a jump). Returns [(gap, a_plan, out)]."""
+  rows, gap = [], gap0
+  for _ in range(n):
+    a = a_fn(gap)
+    rows.append((gap, a, step(g, v, a, lead(gap, vrel=-v), **kw)))
+    gap -= v * DT
+  return rows
+
+
+class _UnreadableLead:
+  """A radarState lead whose dRel raises something _f() does not catch: the update's own except must."""
+  present = status = radar = True
+  radarTrackId = 7
+  vLead = vRel = aLeadK = 0.0
+
+  @property
+  def dRel(self):
+    raise RuntimeError("radarState unreadable")
+
+
 def simulate(plan_fn, gap0=14.0, v0=2.4, governor=True, lag=0.3):
   """A point mass with a first-order lag, today's 0.8 m/s stopping rule and the stopping state's measured ~0.5 m/s^2,
   behind a stopped lead (radar blind below 0.35 m/s: the last range is held). Returns the rest gap."""
@@ -166,16 +188,20 @@ class TestStopGap(OpenpilotTestCase):
     # never lifted: a car ahead of the profile is left to the plan
     for _ in range(10):
       self.assertEqual(step(g, 1.5, -0.3, lead(6.6)), -0.3)
+    # lifted from 9 m, then the candidates ease off to -0.2 while the car closes in at 1.4 m/s: every plan is lowered to
+    # the 4.7 m profile, or by the allowance (A_LIFT_MAX) where the profile asks for more - never further
     g = SG.StopGap()
-    for _ in range(10):
-      step(g, 1.5, -0.9, lead(9.0))
-    self.assertTrue(g.engaged)
-    goal = SG.landing_accel(1.4, 7.2)
-    for _ in range(10):
-      a = step(g, 1.4, -0.2, lead(7.2, vrel=-1.4))
-      self.assertLessEqual(a, -0.2 + 1e-9)
-      self.assertTrue(goal is None or a >= goal - 1e-9)
-      self.assertGreaterEqual(a, -0.2 - SG.A_LIFT_MAX - 1e-9)
+    rows = close_in(g, 1.4, 9.0, lambda gap: -0.9 if gap > 7.6 else -0.2, 40)
+    self.assertTrue(g.engaged and not g.spent)
+    caught = [(gap, a, out) for gap, a, out in rows if a == -0.2]
+    self.assertGreater(len(caught), 10)
+    for gap, a, out in caught:
+      a_catch = SG.landing_accel(1.4, gap, SG.CATCH_GAP)
+      self.assertLess(out, a)                                                   # it caught on every one of them
+      self.assertAlmostEqual(out, a - SG.A_LIFT_MAX if a_catch is None else max(a_catch, a - SG.A_LIFT_MAX), delta=1e-9)
+      self.assertGreaterEqual(out, a - SG.A_LIFT_MAX - 1e-9)
+    self.assertTrue(any(SG.landing_accel(1.4, gap, SG.CATCH_GAP) < a - SG.A_LIFT_MAX for gap, a, _ in caught))  # the bound bit
+    self.assertAlmostEqual(g.max_catch, -SG.A_LIFT_MAX, delta=1e-9)
 
   def test_the_stop_entry_ends_it_and_is_never_deferred(self):
     # a 0.8 m/s rule firing: the plan passes through untouched, one log line, and nothing more this stop
@@ -254,3 +280,120 @@ class TestStopGap(OpenpilotTestCase):
       step(g, 1.5, -0.9, lead(9.0, vl=0.7, al=0.5))
     self.assertTrue(g.spent)
     self.assertIn('pullAway', g.reason or '')
+
+  # --- the gates and trips one at a time, the bounds, the except path, the constants (push19 review) ----------------
+
+  def test_constants(self):
+    self.assertEqual((SG.V_ARM, SG.V_ENTRY, SG.ROLL_ENTRY, SG.REST_GAP, SG.CATCH_GAP, SG.LIFT_ROOM), (2.5, 0.77, 0.57, 5.2, 4.7, 0.30))
+    self.assertEqual((SG.A_LIFT_MAX, SG.LIFT_RATE, SG.T_LAG, SG.V_RADAR_MIN), (0.30, 0.60, 0.30, 0.35))
+    self.assertEqual((SG.A_PLAN_TRIP, SG.A_HAZARD, SG.LEAD_A_HAZARD, SG.HAZARD_HOLD_S), (-1.0, -2.0, -2.5, 3.0))
+    self.assertEqual((SG.LEAD_V_MAX, SG.PULL_AWAY_A, SG.PULL_AWAY_T, SG.LEAD_V_MIN, SG.LEAD_A_MIN), (0.5, 0.3, 0.5, -0.5, -1.0))
+    self.assertEqual((SG.SWAP_TOL, SG.LEAD_JUMP, SG.CAM_TOL, SG.CAM_BIAS, SG.CAM_PROB), (0.75, 1.5, 1.0, 0.45, 0.5))
+    self.assertEqual((SG.PITCH_MIN, SG.DT), (-0.044, 0.05))
+    self.assertEqual((SG.ROLL_BP, SG.ROLL_V), ([0.0, 0.30, 0.35, 0.50, 0.65, 0.77], [0.0, 0.10, 0.13, 0.25, 0.40, 0.57]))
+    from openpilot.selfdrive.controls.radard import RADAR_TO_CAMERA
+    self.assertEqual(SG.RADAR_TO_CAMERA, RADAR_TO_CAMERA)
+
+  def test_the_camera_must_confirm_with_its_probability(self):
+    unsure = SG.CAM_PROB - 0.2                                 # a finite x the camera gives little probability
+    g = SG.StopGap()
+    for _ in range(10):
+      self.assertEqual(step(g, 1.5, -0.9, lead(9.0), prob=unsure), -0.9)
+    self.assertFalse(g.engaged)
+    self.assertEqual(step(g, 1.5, -0.9, lead(9.0), prob=SG.CAM_PROB), -0.9)   # at the threshold: not confirmed
+    for _ in range(10):
+      step(g, 1.5, -0.9, lead(9.0))
+    self.assertTrue(g.engaged)
+    self.assertEqual(step(g, 1.5, -0.9, lead(9.0), prob=unsure), -0.9)        # engaged: it trips
+    self.assertTrue(g.spent)
+    self.assertEqual(g.reason, 'camera')
+
+  def test_a_range_jump_on_the_same_track_trips(self):
+    g = SG.StopGap()
+    for _ in range(10):
+      step(g, 1.5, -0.9, lead(9.0, vrel=-1.5))
+    self.assertTrue(g.engaged)
+    self.assertEqual(step(g, 1.5, -0.9, lead(7.0, vrel=-1.5)), -0.9)          # the same id 7, 1.9 m short of where it should be
+    self.assertTrue(g.spent)
+    self.assertEqual(g.reason, 'leadJump')
+    g = SG.StopGap()
+    for _ in range(10):
+      step(g, 1.5, -0.9, lead(9.0, vrel=-1.5))
+    self.assertGreater(step(g, 1.5, -0.9, lead(9.0 - 1.5 * DT - 1.0, vrel=-1.5)), -0.9)   # 1.0 m off: inside LEAD_JUMP
+    self.assertFalse(g.spent)
+
+  def test_a_new_track_id_is_the_same_car_only_within_swap_tol(self):
+    for off, tripped in ((0.5, False), (1.0, True)):              # 1.0 m: outside SWAP_TOL, though inside LEAD_JUMP
+      g = SG.StopGap()
+      for _ in range(10):
+        step(g, 1.5, -0.9, lead(9.0, vrel=-1.5))
+      step(g, 1.5, -0.9, lead(9.0 - 1.5 * DT - off, tid=8, vrel=-1.5))
+      self.assertEqual(g.spent, tripped, off)
+      self.assertEqual(g.reason, 'newTrack' if tripped else '', off)
+
+  def test_the_mpcs_crash_count_starts_the_hazard_hold(self):
+    g = SG.StopGap()
+    step(g, 5.0, -0.5, lead(15.0), crash=1)
+    for i in range(int(SG.HAZARD_HOLD_S / DT) - 2):
+      self.assertEqual(step(g, 1.5, -0.9, lead(9.0)), -0.9, i)
+      self.assertEqual(g.pause, 'hazardHold')
+
+  def test_engaging_starts_the_hazard_hold(self):
+    g = SG.StopGap()
+    step(g, 1.5, -0.9, lead(9.0), active=False)                  # openpilot not yet engaged (or reset) on this plan
+    for i in range(int(SG.HAZARD_HOLD_S / DT) - 2):
+      self.assertEqual(step(g, 1.5, -0.9, lead(9.0)), -0.9, i)
+      self.assertEqual(g.pause, 'hazardHold')
+    for _ in range(4):
+      a = step(g, 1.5, -0.9, lead(9.0))
+    self.assertGreater(a, -0.9)
+
+  def test_the_queue_moving_off_on_the_leads_speed_alone(self):
+    g = SG.StopGap()
+    for _ in range(10):
+      step(g, 1.5, -0.9, lead(9.0))
+    for _ in range(int(SG.PULL_AWAY_T / DT) + 1):
+      self.assertEqual(step(g, 1.5, -0.9, lead(9.0, vl=0.6)), -0.9)          # just over LEAD_V_MAX, no accel: a pause
+    self.assertTrue(g.spent)
+    self.assertEqual(g.reason, 'pullAway')
+    g = SG.StopGap()
+    for _ in range(20):
+      a = step(g, 1.5, -0.9, lead(9.0, vl=0.45))                             # creeping at 0.45 m/s: still a stopped queue
+    self.assertGreater(a, -0.9)
+    self.assertFalse(g.spent)
+
+  def test_the_lift_stops_at_the_landing_profile(self):
+    goal = SG.landing_accel(1.5, 9.0)
+    self.assertTrue(-0.5 < goal < -0.5 + SG.A_LIFT_MAX)          # the full allowance would carry the plan past it
+    g = SG.StopGap()
+    out = [step(g, 1.5, -0.5, lead(9.0)) for _ in range(20)]
+    self.assertAlmostEqual(out[-1], goal, delta=1e-12)
+    self.assertTrue(all(o <= goal + 1e-12 for o in out))
+
+  def test_an_exception_passes_the_plan_through_with_one_line(self):
+    g = SG.StopGap()
+    self.assertEqual(step(g, 1.5, -0.9, _UnreadableLead(), cam=cam_x(9.0)), -0.9)
+    self.assertIsNone(g.log_line)                                 # not engaged: nothing to say
+    g = SG.StopGap()
+    for _ in range(10):
+      step(g, 1.5, -0.9, lead(9.0))
+    self.assertTrue(g.engaged)
+    self.assertEqual(step(g, 1.5, -0.9, _UnreadableLead(), cam=cam_x(9.0)), -0.9)
+    self.assertEqual(g.reason, 'error')
+    self.assertTrue(g.log_line.startswith('stopgap end=error '), g.log_line)
+    self.assertEqual(step(g, 1.5, -0.9, _UnreadableLead(), cam=cam_x(9.0)), -0.9)
+    self.assertIsNone(g.log_line)
+
+  def test_an_engagement_that_ends_at_rest_or_above_v_arm_writes_its_line(self):
+    # no 0.8 m/s MPC or cruise rule before the rest (the model's flag or the red-light entry began the stop), or the car
+    # back above V_ARM: the line is written, and the governor re-arms for the next stop as before
+    for v, standstill, end in ((0.0, True, 'standstill'), (SG.V_ARM + 0.1, False, 'fast')):
+      g = SG.StopGap()
+      for _ in range(5):
+        step(g, 1.5, -0.9, lead(9.0))
+      self.assertTrue(g.engaged)
+      self.assertEqual(step(g, v, -0.9, lead(9.0), standstill=standstill), -0.9)
+      self.assertTrue(g.log_line.startswith(f'stopgap end={end} arm_v=1.50 '), g.log_line)
+      self.assertFalse(g.engaged or g.spent)
+      self.assertEqual(step(g, v, -0.9, lead(9.0), standstill=standstill), -0.9)
+      self.assertIsNone(g.log_line)

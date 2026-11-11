@@ -226,9 +226,10 @@ def _plan_to_rest(v0, rest_t):
   return [float(x) for x in np.clip(v0 * (1 - t / rest_t), 0, None)]
 
 
-def _sm(v_ego, e2e_accel, plan_vx, lead_d=None, pitch=0.0):
+def _sm(v_ego, e2e_accel, plan_vx, lead_d=None, pitch=0.0, ned=None, model_stop=False, long_state=LongCtrlState.pid):
   """One plannerd frame, engaged in experimental mode: a stopped radar lead (track 7) at lead_d with the camera agreeing,
-  or no lead at all."""
+  or no lead at all. `ned` replaces carControl.orientationNED ([0, pitch, 0]); `model_stop` is the model's own flag;
+  `long_state` is controlsState.longControlState (off = the planner's reset_state)."""
   services = {}
   for service in ("vehicleParameters", "carStateSP", "liveMapDataSP", "gpsLocationExternal", "gpsLocation"):
     services[service] = getattr(messaging.new_message(service), service)
@@ -244,7 +245,7 @@ def _sm(v_ego, e2e_accel, plan_vx, lead_d=None, pitch=0.0):
   cs.carState.vCruise = cs.carState.vCruiseCluster = 50.0
   services['carState'] = cs.carState.as_reader()
   ctl = messaging.new_message('controlsState')
-  ctl.controlsState.longControlState = LongCtrlState.pid
+  ctl.controlsState.longControlState = long_state
   services['controlsState'] = ctl.controlsState.as_reader()
   ss = messaging.new_message('selfdriveState')
   ss.selfdriveState.experimentalMode = True
@@ -253,13 +254,14 @@ def _sm(v_ego, e2e_accel, plan_vx, lead_d=None, pitch=0.0):
   services['selfdriveState'] = ss.selfdriveState.as_reader()
   cc = messaging.new_message('carControl')
   cc.carControl.enabled = True
-  cc.carControl.orientationNED = [0.0, pitch, 0.0]
+  cc.carControl.orientationNED = [0.0, pitch, 0.0] if ned is None else ned
   services['carControl'] = cc.carControl.as_reader()
   m = messaging.new_message('modelV2')
   m.modelV2.orientationRate.z = [0.01] * 33   # nonzero: a straight path divides by zero in SCC vision
   m.modelV2.velocity.x = plan_vx
   m.modelV2.position.x = [float(i) for i in range(33)]
   m.modelV2.action.desiredAcceleration = e2e_accel
+  m.modelV2.action.shouldStop = model_stop
   if lead_d is not None:
     m.modelV2.init('leadsV3', 1)
     cam = m.modelV2.leadsV3[0]
@@ -317,3 +319,44 @@ class TestStopHelpersBuildGate(OpenpilotTestCase):
     assert 0.0 < lift <= SG.LIFT_RATE * DT_MDL + 1e-6, lift
     assert on.output_should_stop == off.output_should_stop
     assert on.stop_gap.engaged and abs(on.stop_gap.lift - lift) < 1e-9
+
+  def test_a_reset_drops_both(self):
+    # long control off (a disengage, the gas): the planner's reset_state reaches both helpers - no red-light latch, no lift
+    on, off = _planner(init_v=0.79), _planner(toggle=False, init_v=0.79)
+    for frame in [_sm(0.79, -0.4, _plan_to_rest(0.79, 1.5), long_state=LongCtrlState.off)] * 3:
+      on.update(frame)
+      off.update(frame)
+      assert not on.e2e_stop.latched
+      assert on.output_should_stop == off.output_should_stop
+    on, off = _planner(init_v=1.5), _planner(toggle=False, init_v=1.5)
+    frame = _sm(1.5, -0.6, _plan_to_rest(1.5, 3.0), lead_d=9.0, long_state=LongCtrlState.off)
+    on.update(frame)
+    off.update(frame)
+    assert on.stop_gap.lift == 0.0 and not on.stop_gap.engaged
+    assert float(on.output_a_target) == float(off.output_a_target)
+
+  def test_the_governor_reads_the_pitch_not_the_roll(self):
+    # orientationNED is [roll, pitch, yaw]: a -0.06 rad pitch (downhill) blocks the lift, a -0.06 rad roll does not, and no
+    # orientation at all is the flat
+    for ned, lifts in (([0.0, -0.06, 0.0], False), ([-0.06, 0.0, 0.0], True), ([], True)):
+      pl = _planner(init_v=1.5)
+      pl.update(_sm(1.5, -0.6, _plan_to_rest(1.5, 3.0), lead_d=9.0, ned=ned))
+      assert (pl.stop_gap.lift > 0.0) == lifts, ned
+
+  def test_at_rest_the_red_light_stop_lets_go_with_the_models_flag(self):
+    # latched at 0.79 m/s; at rest the e2e candidate's flag is the model's own, so when that drops (before the smoothed
+    # accel reaches 0.1) the planner's shouldStop is the toggle-off planner's on every frame: the launch is push18's
+    approach = [_sm(1.2, -0.4, _plan_to_rest(1.2, 4.0))] * 20 + [_sm(0.79, -0.4, _plan_to_rest(0.79, 1.5))]
+    still = [0.02] * 33                                           # at rest (an all-zero plan divides by zero in SCC vision)
+    rest = [_sm(0.0, -0.2, still, model_stop=True)] * 5 + [_sm(0.0, 0.05, still, model_stop=False)] * 5
+    on, off = _planner(init_v=1.2), _planner(toggle=False, init_v=1.2)
+    for frame in approach:
+      on.update(frame)
+      off.update(frame)
+    assert on.e2e_stop.latched
+    for i, frame in enumerate(rest):
+      on.update(frame)
+      off.update(frame)
+      assert on.e2e_stop.latched == (i < 5), i
+      assert on.output_should_stop == off.output_should_stop, i
+      assert float(on.output_a_target) == float(off.output_a_target), i
